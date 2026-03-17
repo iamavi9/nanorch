@@ -1,0 +1,870 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { apiRequest } from "@/lib/queryClient";
+import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Textarea } from "@/components/ui/textarea";
+import { Plus, Send, Trash2, MessageSquare, Bot, User, Loader2, CheckCircle, XCircle, Terminal, ChevronDown, ChevronUp, AlertCircle, FileText, Code2 } from "lucide-react";
+import { cn } from "@/lib/utils";
+import type { ChatConversation, ChatMessage } from "@shared/schema";
+
+interface WorkspaceAgent {
+  id: string;
+  name: string;
+  orchestratorName: string;
+  provider: string;
+  model: string;
+}
+
+type StreamingMsg = {
+  id: string;
+  role: "streaming";
+  agentId: string;
+  agentName: string;
+  content: string;
+  streaming: true;
+  codeRunning?: string;
+  conversationId: string;
+  mentions: string[];
+  messageType: "text";
+  metadata: Record<string, unknown>;
+  createdAt: Date | null;
+};
+type DisplayMessage = ChatMessage | StreamingMsg;
+
+type ConfirmStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+
+type ConfirmState = {
+  status: ConfirmStatus;
+  logs: Array<{ level: string; message: string }>;
+  streamedContent: string;
+  resultMessageId?: string;
+};
+
+const PROVIDER_COLORS: Record<string, string> = {
+  openai: "bg-green-500",
+  anthropic: "bg-orange-500",
+  gemini: "bg-blue-500",
+};
+
+function parseMentionNames(text: string): string[] {
+  const results: string[] = [];
+  const regex = /@([\w][^\s@]*)/g;
+  let m;
+  while ((m = regex.exec(text)) !== null) results.push(m[1]);
+  return results;
+}
+
+function renderWithMentions(text: string, isUser = false) {
+  const parts = text.split(/(@[\w][^\s@]*)/g);
+  return parts.map((part, i) =>
+    part.startsWith("@")
+      ? <span key={i} className={isUser
+          ? "font-bold underline decoration-white/60"
+          : "font-semibold text-primary"
+        }>{part}</span>
+      : <span key={i}>{part}</span>
+  );
+}
+
+interface Props { workspaceId: string }
+
+export default function ChatPage({ workspaceId }: Props) {
+  const qc = useQueryClient();
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [activeConvId, setActiveConvId] = useState<string | null>(null);
+  const [inputText, setInputText] = useState("");
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [displayMessages, setDisplayMessages] = useState<DisplayMessage[]>([]);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [confirmStates, setConfirmStates] = useState<Map<string, ConfirmState>>(new Map());
+
+  const { data: conversations = [], isLoading: convsLoading } = useQuery<ChatConversation[]>({
+    queryKey: [`/api/workspaces/${workspaceId}/conversations`],
+  });
+
+  const { data: defaultConv } = useQuery<ChatConversation>({
+    queryKey: [`/api/workspaces/${workspaceId}/default-conversation`],
+  });
+
+  const { data: agents = [] } = useQuery<WorkspaceAgent[]>({
+    queryKey: [`/api/workspaces/${workspaceId}/agents`],
+  });
+
+  const allConvs: ChatConversation[] = conversations.length > 0
+    ? conversations
+    : (defaultConv ? [defaultConv] : []);
+
+  useEffect(() => {
+    if (!activeConvId && allConvs.length > 0) {
+      setActiveConvId(allConvs[0].id);
+    }
+  }, [allConvs.length]);
+
+  useEffect(() => {
+    if (!activeConvId) return;
+    setDisplayMessages([]);
+    setConfirmStates(new Map());
+    fetch(`/api/conversations/${activeConvId}/messages`)
+      .then(r => r.json())
+      .then((msgs: ChatMessage[]) => {
+        setDisplayMessages(msgs ?? []);
+        const newStates = new Map<string, ConfirmState>();
+        for (const msg of (msgs ?? [])) {
+          if (msg.messageType === "pending_confirmation" && msg.metadata) {
+            const meta = msg.metadata as Record<string, unknown>;
+            const rawStatus = (meta.status as string) ?? "pending";
+            const status: ConfirmStatus =
+              rawStatus === "running" ? "cancelled" :
+              (rawStatus as ConfirmStatus);
+            newStates.set(msg.id, { status, logs: [], streamedContent: "" });
+          }
+        }
+        setConfirmStates(newStates);
+      });
+  }, [activeConvId]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [displayMessages]);
+
+  const createConvMutation = useMutation({
+    mutationFn: () => apiRequest("POST", `/api/workspaces/${workspaceId}/conversations`, { title: "New Chat" }),
+    onSuccess: (conv: any) => {
+      qc.invalidateQueries({ queryKey: [`/api/workspaces/${workspaceId}/conversations`] });
+      setActiveConvId(conv.id);
+      setDisplayMessages([]);
+      setConfirmStates(new Map());
+    },
+  });
+
+  const deleteConvMutation = useMutation({
+    mutationFn: (id: string) => apiRequest("DELETE", `/api/conversations/${id}`),
+    onSuccess: (_, id) => {
+      qc.invalidateQueries({ queryKey: [`/api/workspaces/${workspaceId}/conversations`] });
+      if (activeConvId === id) {
+        setActiveConvId(null);
+        setDisplayMessages([]);
+        setConfirmStates(new Map());
+      }
+    },
+  });
+
+  const getActiveMentionQuery = () => {
+    const el = textareaRef.current;
+    if (!el) return null;
+    const before = el.value.slice(0, el.selectionStart);
+    const m = before.match(/@([\w]*)$/);
+    return m ? m[1] : null;
+  };
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInputText(e.target.value);
+    const el = e.target;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 200) + "px";
+    const q = getActiveMentionQuery();
+    setMentionQuery(q);
+    setMentionIndex(0);
+  };
+
+  const insertMention = (agentName: string) => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const pos = el.selectionStart;
+    const before = el.value.slice(0, pos);
+    const after = el.value.slice(pos);
+    const atIdx = before.lastIndexOf("@");
+    const newText = before.slice(0, atIdx) + `@${agentName} ` + after;
+    setInputText(newText);
+    setMentionQuery(null);
+    setTimeout(() => {
+      el.focus();
+      const newPos = atIdx + agentName.length + 2;
+      el.setSelectionRange(newPos, newPos);
+    }, 0);
+  };
+
+  const filteredAgents = mentionQuery !== null
+    ? agents.filter(a => a.name.toLowerCase().includes(mentionQuery.toLowerCase()))
+    : [];
+
+  const sendMessage = async () => {
+    if (!inputText.trim() || !activeConvId || isStreaming) return;
+    const text = inputText.trim();
+    const mentionedNames = parseMentionNames(text);
+    const mentionedAgents = agents.filter(a =>
+      mentionedNames.some(n => n.toLowerCase() === a.name.toLowerCase())
+    );
+    const mentionedAgentIds = mentionedAgents.map(a => a.id);
+    setInputText("");
+    if (textareaRef.current) textareaRef.current.style.height = "auto";
+    setMentionQuery(null);
+    setIsStreaming(true);
+
+    try {
+      const resp = await fetch(`/api/conversations/${activeConvId}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: text, mentionedAgentIds }),
+      });
+      if (!resp.body) throw new Error("No response body");
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          let event: any;
+          try { event = JSON.parse(line.slice(6)); } catch { continue; }
+
+          if (event.type === "user_message") {
+            setDisplayMessages(prev => [...prev, event.message as ChatMessage]);
+          } else if (event.type === "confirmation") {
+            const msg = event.message as ChatMessage;
+            setDisplayMessages(prev => [...prev, msg]);
+            setConfirmStates(prev => {
+              const next = new Map(prev);
+              next.set(msg.id, { status: "pending", logs: [], streamedContent: "" });
+              return next;
+            });
+          } else if (event.type === "agent_start") {
+            const { agentId, agentName } = event;
+            const placeholder: StreamingMsg = {
+              id: `streaming-${agentId}`,
+              role: "streaming",
+              agentId,
+              agentName,
+              content: "",
+              streaming: true,
+              conversationId: activeConvId,
+              mentions: [],
+              messageType: "text",
+              metadata: {},
+              createdAt: new Date(),
+            };
+            setDisplayMessages(prev => [...prev, placeholder]);
+          } else if (event.type === "code_running") {
+            const { agentId, language } = event;
+            setDisplayMessages(prev => prev.map(m =>
+              m.id === `streaming-${agentId}` && m.role === "streaming"
+                ? { ...m, codeRunning: language as string }
+                : m
+            ));
+          } else if (event.type === "chunk") {
+            const { agentId, content } = event;
+            setDisplayMessages(prev => prev.map(m =>
+              m.id === `streaming-${agentId}` && m.role === "streaming"
+                ? { ...m, content: m.content + content, codeRunning: undefined }
+                : m
+            ));
+          } else if (event.type === "agent_done") {
+            const { agentId, messageId, agentName, metadata } = event;
+            setDisplayMessages(prev => prev.map(m =>
+              m.id === `streaming-${agentId}` && m.role === "streaming"
+                ? { ...m, id: messageId, role: "agent" as const, agentName, metadata: metadata ?? {}, streaming: undefined } as unknown as ChatMessage
+                : m
+            ));
+          } else if (event.type === "agent_error") {
+            setDisplayMessages(prev => prev.filter(m => m.id !== `streaming-${event.agentId}`));
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Chat error:", err);
+    } finally {
+      setIsStreaming(false);
+    }
+  };
+
+  const handleApprove = useCallback(async (msgId: string, convId: string) => {
+    setConfirmStates(prev => {
+      const next = new Map(prev);
+      next.set(msgId, { status: "running", logs: [], streamedContent: "" });
+      return next;
+    });
+
+    try {
+      const resp = await fetch(`/api/conversations/${convId}/messages/${msgId}/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved: true }),
+      });
+      if (!resp.body) throw new Error("No response body");
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          let event: any;
+          try { event = JSON.parse(line.slice(6)); } catch { continue; }
+
+          if (event.type === "task_log") {
+            setConfirmStates(prev => {
+              const next = new Map(prev);
+              const cur = next.get(msgId) ?? { status: "running" as ConfirmStatus, logs: [], streamedContent: "" };
+              next.set(msgId, { ...cur, logs: [...cur.logs, { level: event.level, message: event.message }] });
+              return next;
+            });
+          } else if (event.type === "chunk") {
+            setConfirmStates(prev => {
+              const next = new Map(prev);
+              const cur = next.get(msgId) ?? { status: "running" as ConfirmStatus, logs: [], streamedContent: "" };
+              next.set(msgId, { ...cur, streamedContent: cur.streamedContent + event.content });
+              return next;
+            });
+          } else if (event.type === "done") {
+            const resultMsg = event.resultMessage as ChatMessage;
+            setDisplayMessages(prev => [...prev, resultMsg]);
+            setConfirmStates(prev => {
+              const next = new Map(prev);
+              const cur = next.get(msgId) ?? { status: "running" as ConfirmStatus, logs: [], streamedContent: "" };
+              next.set(msgId, { ...cur, status: "completed", resultMessageId: resultMsg.id });
+              return next;
+            });
+          } else if (event.type === "error") {
+            setConfirmStates(prev => {
+              const next = new Map(prev);
+              const cur = next.get(msgId) ?? { status: "running" as ConfirmStatus, logs: [], streamedContent: "" };
+              next.set(msgId, { ...cur, status: "failed" });
+              return next;
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Confirm error:", err);
+      setConfirmStates(prev => {
+        const next = new Map(prev);
+        const cur = next.get(msgId) ?? { status: "running" as ConfirmStatus, logs: [], streamedContent: "" };
+        next.set(msgId, { ...cur, status: "failed" });
+        return next;
+      });
+    }
+  }, []);
+
+  const handleCancel = useCallback(async (msgId: string, convId: string) => {
+    setConfirmStates(prev => {
+      const next = new Map(prev);
+      const cur = next.get(msgId) ?? { status: "cancelled" as ConfirmStatus, logs: [], streamedContent: "" };
+      next.set(msgId, { ...cur, status: "cancelled" });
+      return next;
+    });
+    try {
+      await fetch(`/api/conversations/${convId}/messages/${msgId}/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved: false }),
+      });
+    } catch {}
+  }, []);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (mentionQuery !== null && filteredAgents.length > 0) {
+      if (e.key === "Escape") { e.preventDefault(); setMentionQuery(null); return; }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setMentionIndex((i) => (i + 1) % filteredAgents.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setMentionIndex((i) => (i - 1 + filteredAgents.length) % filteredAgents.length);
+        return;
+      }
+      if (e.key === "Tab" || e.key === "Enter") {
+        e.preventDefault();
+        insertMention(filteredAgents[mentionIndex]?.name ?? filteredAgents[0].name);
+        return;
+      }
+    }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  };
+
+  return (
+    <div className="flex h-full overflow-hidden bg-background">
+      <div className="w-52 flex flex-col border-r shrink-0">
+        <div className="p-3 border-b">
+          <Button
+            size="sm"
+            variant="outline"
+            className="w-full gap-1.5 text-xs"
+            onClick={() => createConvMutation.mutate()}
+            disabled={createConvMutation.isPending}
+            data-testid="button-new-chat"
+          >
+            <Plus className="w-3 h-3" /> New Chat
+          </Button>
+        </div>
+
+        <ScrollArea className="flex-1 py-1">
+          <div className="px-2 space-y-0.5">
+            {convsLoading && <p className="text-xs text-muted-foreground px-2 py-2">Loading…</p>}
+            {allConvs.map(conv => (
+              <div
+                key={conv.id}
+                className={cn(
+                  "group flex items-center justify-between gap-1 px-2 py-1.5 rounded-md cursor-pointer text-xs transition-colors",
+                  activeConvId === conv.id
+                    ? "bg-accent text-accent-foreground"
+                    : "text-muted-foreground hover:bg-accent/50"
+                )}
+                onClick={() => setActiveConvId(conv.id)}
+                data-testid={`conv-item-${conv.id}`}
+              >
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <MessageSquare className="w-3 h-3 shrink-0" />
+                  <span className="truncate">{conv.title}</span>
+                </div>
+                <button
+                  className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive transition-opacity shrink-0"
+                  onClick={(e) => { e.stopPropagation(); deleteConvMutation.mutate(conv.id); }}
+                  data-testid={`button-delete-conv-${conv.id}`}
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
+            {!convsLoading && allConvs.length === 0 && (
+              <p className="text-xs text-muted-foreground px-2 py-2">No conversations yet</p>
+            )}
+          </div>
+        </ScrollArea>
+
+        <div className="border-t p-3">
+          <div className="text-[10px] font-semibold text-muted-foreground/50 uppercase tracking-wider mb-2">Agents</div>
+          {agents.length === 0
+            ? <p className="text-xs text-muted-foreground/60">No agents</p>
+            : (
+              <div className="space-y-1.5">
+                {agents.map(agent => (
+                  <div key={agent.id} className="flex items-center gap-2">
+                    <div className={cn(
+                      "w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shrink-0",
+                      PROVIDER_COLORS[agent.provider] ?? "bg-zinc-500"
+                    )}>
+                      {agent.name[0].toUpperCase()}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs truncate text-foreground/80">{agent.name}</div>
+                      <div className="text-[10px] text-muted-foreground/60 truncate">{agent.provider}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )
+          }
+        </div>
+      </div>
+
+      <div className="flex-1 flex flex-col min-w-0">
+        <div className="h-14 border-b flex items-center px-5 gap-2 shrink-0">
+          <MessageSquare className="w-4 h-4 text-primary" />
+          <h1 className="font-semibold">Chat</h1>
+          {agents.length > 0 && (
+            <span className="text-xs text-muted-foreground">
+              · Type <kbd className="font-mono bg-muted rounded px-1">@name</kbd> to mention an agent
+            </span>
+          )}
+        </div>
+
+        <ScrollArea className="flex-1">
+          <div className="p-6 space-y-5 max-w-3xl mx-auto w-full">
+            {displayMessages.length === 0 && !isStreaming && (
+              <div className="flex flex-col items-center justify-center h-52 text-center">
+                <Bot className="w-12 h-12 mb-4 text-muted-foreground/30" />
+                <p className="text-sm font-medium text-muted-foreground">
+                  {agents.length === 0 ? "No agents configured" : "Start a conversation"}
+                </p>
+                <p className="text-xs text-muted-foreground/60 mt-1 max-w-xs">
+                  {agents.length === 0
+                    ? "Create agents from an orchestrator first, then come back to chat"
+                    : `Mention @${agents[0]?.name ?? "AgentName"} to get a response from that agent`
+                  }
+                </p>
+              </div>
+            )}
+
+            {displayMessages.map(msg => {
+              if ((msg as ChatMessage).messageType === "pending_confirmation") {
+                const confirmState = confirmStates.get(msg.id) ?? { status: "pending", logs: [], streamedContent: "" };
+                return (
+                  <ConfirmationCard
+                    key={msg.id}
+                    message={msg as ChatMessage}
+                    confirmState={confirmState}
+                    convId={activeConvId!}
+                    onApprove={() => handleApprove(msg.id, activeConvId!)}
+                    onCancel={() => handleCancel(msg.id, activeConvId!)}
+                  />
+                );
+              }
+              if ((msg as ChatMessage).messageType === "task_result") {
+                return <MessageBubble key={msg.id} message={msg} isTaskResult />;
+              }
+              return <MessageBubble key={msg.id} message={msg} />;
+            })}
+            <div ref={messagesEndRef} />
+          </div>
+        </ScrollArea>
+
+        <div className="border-t p-4 shrink-0">
+          <div className="max-w-3xl mx-auto relative">
+            {mentionQuery !== null && filteredAgents.length > 0 && (
+              <div
+                className="absolute bottom-full mb-2 left-0 bg-popover border rounded-xl shadow-xl z-50 min-w-[220px] overflow-hidden"
+                data-testid="mention-dropdown"
+              >
+                <div className="px-3 py-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider border-b">
+                  Agents
+                </div>
+                {filteredAgents.map((agent, idx) => (
+                  <button
+                    key={agent.id}
+                    className={cn(
+                      "w-full flex items-center gap-3 px-3 py-2 text-sm text-left transition-colors",
+                      idx === mentionIndex ? "bg-accent text-accent-foreground" : "hover:bg-accent/50"
+                    )}
+                    onMouseDown={(e) => { e.preventDefault(); insertMention(agent.name); }}
+                    onMouseEnter={() => setMentionIndex(idx)}
+                    data-testid={`mention-option-${agent.id}`}
+                  >
+                    <div className={cn(
+                      "w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0",
+                      PROVIDER_COLORS[agent.provider] ?? "bg-zinc-500"
+                    )}>
+                      {agent.name[0].toUpperCase()}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="font-medium text-sm">{agent.name}</div>
+                      <div className="text-xs text-muted-foreground truncate">
+                        {agent.orchestratorName} · {agent.provider}
+                      </div>
+                    </div>
+                    {idx === mentionIndex && (
+                      <kbd className="ml-auto text-[10px] font-mono bg-muted rounded px-1 text-muted-foreground">↵</kbd>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="flex items-end gap-2">
+              <Textarea
+                ref={textareaRef}
+                placeholder={agents.length > 0
+                  ? `Message… type @ to mention an agent`
+                  : "Message…"
+                }
+                value={inputText}
+                onChange={handleInputChange}
+                onKeyDown={handleKeyDown}
+                rows={1}
+                className="resize-none min-h-[44px] max-h-[200px] flex-1 leading-relaxed"
+                disabled={isStreaming || !activeConvId}
+                data-testid="input-chat-message"
+              />
+              <Button
+                onClick={sendMessage}
+                disabled={!inputText.trim() || isStreaming || !activeConvId}
+                className="h-[44px] w-[44px] p-0 shrink-0"
+                data-testid="button-send-message"
+              >
+                {isStreaming
+                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                  : <Send className="w-4 h-4" />
+                }
+              </Button>
+            </div>
+            <p className="text-[11px] text-muted-foreground/60 mt-1.5 ml-1">
+              Enter to send · Shift+Enter for newline · ↑↓ to navigate · ↵ to select @mention
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface ConfirmationCardProps {
+  message: ChatMessage;
+  confirmState: ConfirmState;
+  convId: string;
+  onApprove: () => void;
+  onCancel: () => void;
+}
+
+function ConfirmationCard({ message, confirmState, onApprove, onCancel }: ConfirmationCardProps) {
+  const [logsOpen, setLogsOpen] = useState(false);
+  const meta = (message.metadata ?? {}) as Record<string, unknown>;
+  const agentName = meta.agentName as string ?? "Agent";
+  const proposedAction = meta.proposedAction as string ?? "";
+  const { status, logs, streamedContent } = confirmState;
+
+  const isPending = status === "pending";
+  const isRunning = status === "running";
+  const isDone = status === "completed" || status === "failed";
+  const isCancelled = status === "cancelled";
+
+  return (
+    <div
+      className="flex gap-3"
+      data-testid={`confirmation-card-${message.id}`}
+    >
+      <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 mt-0.5 text-white bg-amber-500">
+        <Terminal className="w-3.5 h-3.5" />
+      </div>
+
+      <div className="flex-1 max-w-[75%]">
+        <div className="flex items-center gap-2 px-1 mb-1">
+          <span className="text-xs font-semibold text-foreground">{agentName}</span>
+          <span className="text-xs text-muted-foreground">wants to run a cloud action</span>
+        </div>
+
+        <div className="bg-muted border rounded-xl overflow-hidden">
+          <div className="px-4 py-3">
+            <div className="flex items-start gap-2 mb-3">
+              <Terminal className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">Requested action</p>
+                <p className="text-sm text-foreground font-mono break-all bg-background/60 rounded-md px-2 py-1.5">
+                  {proposedAction}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-muted-foreground/80 mb-3 flex items-center gap-1">
+              <AlertCircle className="w-3 h-3 shrink-0" />
+              This will execute in an isolated environment using your cloud credentials.
+            </p>
+
+            {isPending && (
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  className="h-7 text-xs gap-1.5"
+                  onClick={onApprove}
+                  data-testid={`button-approve-${message.id}`}
+                >
+                  <CheckCircle className="w-3.5 h-3.5" /> Approve & Run
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs gap-1.5"
+                  onClick={onCancel}
+                  data-testid={`button-cancel-${message.id}`}
+                >
+                  <XCircle className="w-3.5 h-3.5" /> Cancel
+                </Button>
+              </div>
+            )}
+
+            {isRunning && (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
+                <span>Executing in isolated environment…</span>
+              </div>
+            )}
+
+            {isDone && (
+              <div className={cn(
+                "flex items-center gap-1.5 text-xs font-medium",
+                status === "completed" ? "text-green-600 dark:text-green-400" : "text-destructive"
+              )}>
+                {status === "completed"
+                  ? <CheckCircle className="w-3.5 h-3.5" />
+                  : <XCircle className="w-3.5 h-3.5" />
+                }
+                {status === "completed" ? "Completed — see result below" : "Execution failed — see result below"}
+              </div>
+            )}
+
+            {isCancelled && (
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <XCircle className="w-3.5 h-3.5" />
+                Cancelled
+              </div>
+            )}
+          </div>
+
+          {(isRunning || isDone) && logs.length > 0 && (
+            <div className="border-t">
+              <button
+                className="w-full flex items-center justify-between px-4 py-2 text-xs text-muted-foreground hover:bg-accent/40 transition-colors"
+                onClick={() => setLogsOpen(v => !v)}
+                data-testid={`button-toggle-logs-${message.id}`}
+              >
+                <span className="flex items-center gap-1.5">
+                  <Terminal className="w-3 h-3" />
+                  Execution logs ({logs.length})
+                </span>
+                {logsOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              </button>
+              {logsOpen && (
+                <div className="px-4 pb-3 max-h-48 overflow-y-auto">
+                  <div className="font-mono text-xs space-y-0.5 bg-black/20 rounded-md p-2">
+                    {logs.map((log, i) => (
+                      <div
+                        key={i}
+                        className={cn(
+                          "flex gap-2",
+                          log.level === "error" ? "text-red-400" :
+                          log.level === "warn" ? "text-amber-400" :
+                          "text-green-400"
+                        )}
+                      >
+                        <span className="shrink-0 text-muted-foreground/50">[{log.level}]</span>
+                        <span className="break-all">{log.message}</span>
+                      </div>
+                    ))}
+                    {isRunning && streamedContent && (
+                      <div className="text-blue-400 break-all">{streamedContent}</div>
+                    )}
+                    {isRunning && (
+                      <div className="text-muted-foreground/50 animate-pulse">▊</div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface SourceChunk {
+  content: string;
+  documentName: string;
+  score: number;
+  datasetId?: string;
+}
+
+function SourcesAccordion({ sources }: { sources: SourceChunk[] }) {
+  const [open, setOpen] = useState(false);
+  const unique = sources.reduce<SourceChunk[]>((acc, s) => {
+    if (!acc.find((x) => x.documentName === s.documentName && Math.abs(x.score - s.score) < 0.001)) acc.push(s);
+    return acc;
+  }, []);
+
+  return (
+    <div className="mt-1.5 rounded-xl border border-border/60 overflow-hidden text-xs">
+      <button
+        className="w-full flex items-center gap-1.5 px-3 py-1.5 bg-muted/50 hover:bg-muted text-muted-foreground font-medium transition-colors"
+        onClick={() => setOpen((o) => !o)}
+        data-testid="button-toggle-sources"
+      >
+        <FileText className="w-3 h-3 shrink-0" />
+        <span>{unique.length} source{unique.length !== 1 ? "s" : ""}</span>
+        {open ? <ChevronUp className="w-3 h-3 ml-auto" /> : <ChevronDown className="w-3 h-3 ml-auto" />}
+      </button>
+      {open && (
+        <div className="divide-y divide-border/40 bg-background/60">
+          {unique.map((s, i) => (
+            <div key={i} className="px-3 py-2 flex items-start gap-2" data-testid={`source-item-${i}`}>
+              <FileText className="w-3 h-3 text-muted-foreground shrink-0 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <p className="font-medium text-foreground truncate">{s.documentName || "Unknown document"}</p>
+                <p className="text-muted-foreground line-clamp-2 mt-0.5 leading-relaxed">{s.content}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MessageBubble({ message, isTaskResult }: { message: DisplayMessage; isTaskResult?: boolean }) {
+  const isUser = message.role === "user";
+  const isStreaming = (message as StreamingMsg).streaming === true;
+  const codeRunning = (message as StreamingMsg).codeRunning;
+  const agentName = (message as any).agentName as string | undefined;
+  const meta = (message as any).metadata as Record<string, unknown> | undefined;
+  const sources = (meta?.sources as SourceChunk[] | undefined) ?? [];
+
+  return (
+    <div className={cn("flex gap-3", isUser ? "flex-row-reverse" : "flex-row")} data-testid={`message-${message.id}`}>
+      <div className={cn(
+        "w-7 h-7 rounded-full flex items-center justify-center shrink-0 mt-0.5 text-white",
+        isUser
+          ? "bg-primary"
+          : isTaskResult
+            ? "bg-violet-500"
+            : (PROVIDER_COLORS["openai"] ?? "bg-zinc-500")
+      )}>
+        {isUser
+          ? <User className="w-3.5 h-3.5" />
+          : isTaskResult
+            ? <Terminal className="w-3.5 h-3.5" />
+            : <span className="text-xs font-bold">{(agentName ?? "A")[0].toUpperCase()}</span>
+        }
+      </div>
+
+      <div className={cn("flex flex-col gap-1 max-w-[75%]", isUser ? "items-end" : "items-start")}>
+        {!isUser && (
+          <div className="flex items-center gap-2 px-1">
+            <span className="text-xs font-semibold text-foreground">
+              {isTaskResult ? `${agentName ?? "Agent"} · Task Result` : (agentName ?? "Agent")}
+            </span>
+            {isStreaming && !codeRunning && (
+              <span className="text-[11px] text-muted-foreground animate-pulse">typing…</span>
+            )}
+            {codeRunning && (
+              <span className="flex items-center gap-1 text-[11px] text-blue-500">
+                <Code2 className="w-3 h-3 animate-pulse" />
+                running {codeRunning} in sandbox…
+              </span>
+            )}
+          </div>
+        )}
+        <div className={cn(
+          "rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words",
+          isUser
+            ? "bg-primary text-primary-foreground rounded-tr-sm"
+            : isTaskResult
+              ? "bg-violet-500/10 border border-violet-500/20 text-foreground rounded-tl-sm font-mono text-xs"
+              : "bg-muted text-foreground rounded-tl-sm"
+        )}>
+          {isUser
+            ? renderWithMentions(message.content, true)
+            : message.content
+          }
+          {isStreaming && !message.content && (
+            <span className="inline-flex items-center gap-1 h-4">
+              <span className="w-1.5 h-1.5 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+              <span className="w-1.5 h-1.5 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+              <span className="w-1.5 h-1.5 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+            </span>
+          )}
+        </div>
+        {!isUser && sources.length > 0 && (
+          <div className="w-full max-w-[90%]">
+            <SourcesAccordion sources={sources} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

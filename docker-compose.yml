@@ -1,0 +1,100 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────
+#  NanoOrch — Docker Compose (EC2 / self-hosted)
+#
+#  Quick start:
+#    cp .env.example .env                              # fill in passwords + API keys
+#    docker build -t nanoorch-agent:latest ./agent     # action-task runner
+#    docker build -t nanoorch-sandbox:latest ./agent/sandbox  # code execution sandbox
+#    docker compose up -d
+#    open http://<your-ip>:3000
+#
+#  Sandbox runtimes:
+#    SANDBOX_RUNTIME=runsc  (default) requires gVisor installed on the host
+#    SANDBOX_RUNTIME=runc   uses standard Docker (no gVisor needed)
+# ─────────────────────────────────────────────────────────────
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-nanoorch}
+      POSTGRES_USER:     ${POSTGRES_USER:-nanoorch}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nanoorch} -d ${POSTGRES_DB:-nanoorch}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nanoorch_net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-4000}:3000"
+    environment:
+      NODE_ENV:    production
+      PORT:        3000
+      MIGRATIONS_DIR: /app/migrations
+
+      # Database
+      DATABASE_URL: postgres://${POSTGRES_USER:-nanoorch}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nanoorch}
+
+      # Session (required — use a long random string)
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
+
+      # Admin account (seeded on first boot only)
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+
+      # Credential encryption — strongly recommended; derived from SESSION_SECRET if blank
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+
+      # AI provider keys (at least one required)
+      AI_INTEGRATIONS_OPENAI_API_KEY:     ${AI_INTEGRATIONS_OPENAI_API_KEY:-}
+      AI_INTEGRATIONS_OPENAI_BASE_URL:    ${AI_INTEGRATIONS_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      AI_INTEGRATIONS_ANTHROPIC_API_KEY:  ${AI_INTEGRATIONS_ANTHROPIC_API_KEY:-}
+      AI_INTEGRATIONS_ANTHROPIC_BASE_URL: ${AI_INTEGRATIONS_ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+      AI_INTEGRATIONS_GEMINI_API_KEY:     ${AI_INTEGRATIONS_GEMINI_API_KEY:-}
+      AI_INTEGRATIONS_GEMINI_BASE_URL:    ${AI_INTEGRATIONS_GEMINI_BASE_URL:-https://generativelanguage.googleapis.com}
+
+      # Docker sandbox (action tasks + code execution)
+      # Mount the host Docker socket so the app can spawn containers
+      DOCKER_SOCKET:    /var/run/docker.sock
+      AGENT_IMAGE:      ${AGENT_IMAGE:-nanoorch-agent:latest}
+      SANDBOX_IMAGE:    ${SANDBOX_IMAGE:-nanoorch-sandbox:latest}
+      # Set SANDBOX_RUNTIME=runc if gVisor (runsc) is not installed on the host
+      SANDBOX_RUNTIME:  ${SANDBOX_RUNTIME:-runsc}
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # /api/auth/me is public and always returns 200 (null when unauthenticated)
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/auth/me || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - nanoorch_net
+
+volumes:
+  postgres_data:
+
+networks:
+  nanoorch_net:
+    external: true   # name of your existing RAGFlow Docker network
+    name: ctgpt_rag-net
