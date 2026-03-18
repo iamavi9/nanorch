@@ -1,19 +1,31 @@
-import { eq, desc, and, inArray, sql } from "drizzle-orm";
+import { eq, desc, and, inArray, sql, gte } from "drizzle-orm";
 import { db } from "./db";
 import {
-  users, workspaces, workspaceMembers, orchestrators, agents, channels, tasks, taskLogs, agentMemory, cloudIntegrations,
-  chatConversations, chatMessages,
+  users, workspaces, workspaceMembers, orchestrators, agents, channels, channelDeliveries, tasks, taskLogs, agentMemory, cloudIntegrations,
+  chatConversations, chatMessages, scheduledJobs,
+  approvalRequests, pipelines, pipelineSteps, pipelineRuns, pipelineStepRuns, tokenUsage,
+  workspaceConfig, commsThreads,
   type User, type InsertUser,
   type Workspace, type InsertWorkspace,
   type Orchestrator, type InsertOrchestrator,
   type Agent, type InsertAgent,
   type Channel, type InsertChannel,
+  type ChannelDelivery,
   type Task, type InsertTask,
   type TaskLog,
   type AgentMemory,
   type CloudIntegration, type InsertCloudIntegration,
   type ChatConversation, type InsertChatConversation,
   type ChatMessage, type InsertChatMessage,
+  type ScheduledJob, type InsertScheduledJob,
+  type ApprovalRequest, type InsertApprovalRequest,
+  type Pipeline, type InsertPipeline,
+  type PipelineStep, type InsertPipelineStep,
+  type PipelineRun, type InsertPipelineRun,
+  type PipelineStepRun,
+  type TokenUsage, type InsertTokenUsage,
+  type WorkspaceConfig,
+  type CommsThread, type InsertCommsThread,
 } from "@shared/schema";
 
 export type WorkspaceMemberWithUser = {
@@ -34,8 +46,12 @@ export interface IStorage {
   listWorkspaceMembers(workspaceId: string): Promise<WorkspaceMemberWithUser[]>;
   addWorkspaceMember(workspaceId: string, userId: string, role: "admin" | "member"): Promise<void>;
   removeWorkspaceMember(workspaceId: string, userId: string): Promise<void>;
+  updateWorkspaceMemberRole(workspaceId: string, userId: string, role: "admin" | "member"): Promise<void>;
   isWorkspaceMember(workspaceId: string, userId: string): Promise<boolean>;
+  isWorkspaceAdminMember(workspaceId: string, userId: string): Promise<boolean>;
+  getWorkspaceAdminIds(userId: string): Promise<string[]>;
   getUserWorkspaces(userId: string): Promise<Workspace[]>;
+  getAdminWorkspaces(userId: string): Promise<Workspace[]>;
 
   getWorkspace(id: string): Promise<Workspace | undefined>;
   getWorkspaceBySlug(slug: string): Promise<Workspace | undefined>;
@@ -43,6 +59,14 @@ export interface IStorage {
   createWorkspace(data: InsertWorkspace): Promise<Workspace>;
   updateWorkspace(id: string, data: Partial<InsertWorkspace>): Promise<Workspace>;
   deleteWorkspace(id: string): Promise<void>;
+
+  getWorkspaceConfig(workspaceId: string): Promise<WorkspaceConfig | undefined>;
+  upsertWorkspaceConfig(workspaceId: string, data: Partial<Omit<WorkspaceConfig, "workspaceId" | "updatedAt">>): Promise<WorkspaceConfig>;
+  countOrchestrators(workspaceId: string): Promise<number>;
+  countAgentsInWorkspace(workspaceId: string): Promise<number>;
+  countChannelsInWorkspace(workspaceId: string): Promise<number>;
+  countScheduledJobsInWorkspace(workspaceId: string): Promise<number>;
+  countCloudIntegrations(workspaceId: string): Promise<number>;
 
   listOrchestrators(workspaceId: string): Promise<Orchestrator[]>;
   getOrchestrator(id: string): Promise<Orchestrator | undefined>;
@@ -89,6 +113,7 @@ export interface IStorage {
   getChatConversation(id: string): Promise<ChatConversation | undefined>;
   getOrCreateDefaultConversation(workspaceId: string): Promise<ChatConversation>;
   createChatConversation(data: InsertChatConversation): Promise<ChatConversation>;
+  updateChatConversation(id: string, title: string): Promise<ChatConversation>;
   deleteChatConversation(id: string): Promise<void>;
   listChatMessages(conversationId: string): Promise<ChatMessage[]>;
   getChatMessage(id: string): Promise<ChatMessage | undefined>;
@@ -96,6 +121,64 @@ export interface IStorage {
   updateChatMessage(id: string, data: Partial<ChatMessage>): Promise<ChatMessage>;
   listAgentsForWorkspace(workspaceId: string): Promise<(Agent & { orchestratorName: string; provider: string; model: string; baseUrl: string | null })[]>;
   getWorkspaceStats(workspaceId: string): Promise<{ orchestrators: number; agents: number; completedTasks: number; failedTasks: number; runningTasks: number; pendingTasks: number }>;
+
+  listScheduledJobs(workspaceId: string): Promise<ScheduledJob[]>;
+  listAllActiveScheduledJobs(): Promise<ScheduledJob[]>;
+  getScheduledJob(id: string): Promise<ScheduledJob | undefined>;
+  createScheduledJob(data: InsertScheduledJob): Promise<ScheduledJob>;
+  updateScheduledJob(id: string, data: Partial<ScheduledJob>): Promise<ScheduledJob>;
+  deleteScheduledJob(id: string): Promise<void>;
+
+  listOutboundChannels(orchestratorId: string): Promise<Channel[]>;
+  logChannelDelivery(data: { channelId: string; event: string; statusCode?: number; responseBody?: string; error?: string }): Promise<void>;
+  listChannelDeliveries(channelId: string, limit?: number): Promise<ChannelDelivery[]>;
+
+  listApprovalRequests(workspaceId: string, status?: string): Promise<ApprovalRequest[]>;
+  getApprovalRequest(id: string): Promise<ApprovalRequest | undefined>;
+  createApprovalRequest(data: InsertApprovalRequest): Promise<ApprovalRequest>;
+  resolveApprovalRequest(id: string, resolvedBy: string, resolution: string, status: "approved" | "rejected"): Promise<ApprovalRequest>;
+  countPendingApprovals(workspaceId: string): Promise<number>;
+
+  listPipelines(workspaceId: string): Promise<Pipeline[]>;
+  getPipeline(id: string): Promise<Pipeline | undefined>;
+  createPipeline(data: InsertPipeline): Promise<Pipeline>;
+  updatePipeline(id: string, data: Partial<Pipeline>): Promise<Pipeline>;
+  deletePipeline(id: string): Promise<void>;
+
+  listPipelineSteps(pipelineId: string): Promise<PipelineStep[]>;
+  createPipelineStep(data: InsertPipelineStep): Promise<PipelineStep>;
+  updatePipelineStep(id: string, data: Partial<PipelineStep>): Promise<PipelineStep>;
+  deletePipelineStep(id: string): Promise<void>;
+  deleteAllPipelineSteps(pipelineId: string): Promise<void>;
+
+  listPipelineRuns(pipelineId: string, limit?: number): Promise<PipelineRun[]>;
+  getPipelineRun(id: string): Promise<PipelineRun | undefined>;
+  createPipelineRun(data: InsertPipelineRun): Promise<PipelineRun>;
+  updatePipelineRun(id: string, data: Partial<PipelineRun>): Promise<PipelineRun>;
+
+  listPipelineStepRuns(runId: string): Promise<PipelineStepRun[]>;
+  createPipelineStepRun(data: Partial<PipelineStepRun> & { runId: string; stepId: string }): Promise<PipelineStepRun>;
+  updatePipelineStepRun(id: string, data: Partial<PipelineStepRun>): Promise<PipelineStepRun>;
+
+  createTokenUsage(data: InsertTokenUsage): Promise<TokenUsage>;
+  getWorkspaceTokenStats(workspaceId: string, days?: number): Promise<{
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalCostUsd: number;
+    byAgent: Array<{ agentName: string; inputTokens: number; outputTokens: number; costUsd: number; calls: number }>;
+    byDay: Array<{ date: string; inputTokens: number; outputTokens: number; costUsd: number }>;
+    byProvider: Array<{ provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number }>;
+    recentUsage: TokenUsage[];
+  }>;
+
+  getChannelById(id: string): Promise<Channel | undefined>;
+  getOrchestratorForChannel(channelId: string): Promise<Orchestrator | undefined>;
+
+  createCommsThread(data: InsertCommsThread): Promise<CommsThread>;
+  getCommsThread(channelId: string, externalThreadId: string): Promise<CommsThread | undefined>;
+  getCommsThreadById(id: string): Promise<CommsThread | undefined>;
+  touchCommsThread(id: string): Promise<void>;
+  updateCommsThreadRef(id: string, ref: Record<string, string>): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -153,11 +236,35 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(workspaceMembers.workspaceId, workspaceId), eq(workspaceMembers.userId, userId)));
   }
 
+  async updateWorkspaceMemberRole(workspaceId: string, userId: string, role: "admin" | "member") {
+    await db.update(workspaceMembers)
+      .set({ role })
+      .where(and(eq(workspaceMembers.workspaceId, workspaceId), eq(workspaceMembers.userId, userId)));
+  }
+
   async isWorkspaceMember(workspaceId: string, userId: string): Promise<boolean> {
     const [row] = await db.select({ id: workspaceMembers.id })
       .from(workspaceMembers)
       .where(and(eq(workspaceMembers.workspaceId, workspaceId), eq(workspaceMembers.userId, userId)));
     return !!row;
+  }
+
+  async isWorkspaceAdminMember(workspaceId: string, userId: string): Promise<boolean> {
+    const [row] = await db.select({ id: workspaceMembers.id })
+      .from(workspaceMembers)
+      .where(and(
+        eq(workspaceMembers.workspaceId, workspaceId),
+        eq(workspaceMembers.userId, userId),
+        eq(workspaceMembers.role, "admin"),
+      ));
+    return !!row;
+  }
+
+  async getWorkspaceAdminIds(userId: string): Promise<string[]> {
+    const rows = await db.select({ workspaceId: workspaceMembers.workspaceId })
+      .from(workspaceMembers)
+      .where(and(eq(workspaceMembers.userId, userId), eq(workspaceMembers.role, "admin")));
+    return rows.map((r) => r.workspaceId);
   }
 
   async getUserWorkspaces(userId: string): Promise<Workspace[]> {
@@ -166,6 +273,16 @@ export class DatabaseStorage implements IStorage {
       .from(workspaceMembers)
       .innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
       .where(eq(workspaceMembers.userId, userId))
+      .orderBy(desc(workspaces.createdAt));
+    return rows.map((r) => r.workspace);
+  }
+
+  async getAdminWorkspaces(userId: string): Promise<Workspace[]> {
+    const rows = await db
+      .select({ workspace: workspaces })
+      .from(workspaceMembers)
+      .innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
+      .where(and(eq(workspaceMembers.userId, userId), eq(workspaceMembers.role, "admin")))
       .orderBy(desc(workspaces.createdAt));
     return rows.map((r) => r.workspace);
   }
@@ -196,6 +313,56 @@ export class DatabaseStorage implements IStorage {
 
   async deleteWorkspace(id: string) {
     await db.delete(workspaces).where(eq(workspaces.id, id));
+  }
+
+  async getWorkspaceConfig(workspaceId: string) {
+    const [cfg] = await db.select().from(workspaceConfig).where(eq(workspaceConfig.workspaceId, workspaceId));
+    return cfg;
+  }
+
+  async upsertWorkspaceConfig(workspaceId: string, data: Partial<Omit<WorkspaceConfig, "workspaceId" | "updatedAt">>) {
+    const [cfg] = await db
+      .insert(workspaceConfig)
+      .values({ workspaceId, ...data, updatedAt: new Date() })
+      .onConflictDoUpdate({
+        target: workspaceConfig.workspaceId,
+        set: { ...data, updatedAt: new Date() },
+      })
+      .returning();
+    return cfg;
+  }
+
+  async countOrchestrators(workspaceId: string) {
+    const [r] = await db.select({ n: sql<number>`count(*)::int` }).from(orchestrators).where(eq(orchestrators.workspaceId, workspaceId));
+    return r?.n ?? 0;
+  }
+
+  async countAgentsInWorkspace(workspaceId: string) {
+    const [r] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(agents)
+      .innerJoin(orchestrators, eq(agents.orchestratorId, orchestrators.id))
+      .where(eq(orchestrators.workspaceId, workspaceId));
+    return r?.n ?? 0;
+  }
+
+  async countChannelsInWorkspace(workspaceId: string) {
+    const [r] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(channels)
+      .innerJoin(orchestrators, eq(channels.orchestratorId, orchestrators.id))
+      .where(eq(orchestrators.workspaceId, workspaceId));
+    return r?.n ?? 0;
+  }
+
+  async countScheduledJobsInWorkspace(workspaceId: string) {
+    const [r] = await db.select({ n: sql<number>`count(*)::int` }).from(scheduledJobs).where(eq(scheduledJobs.workspaceId, workspaceId));
+    return r?.n ?? 0;
+  }
+
+  async countCloudIntegrations(workspaceId: string) {
+    const [r] = await db.select({ n: sql<number>`count(*)::int` }).from(cloudIntegrations).where(eq(cloudIntegrations.workspaceId, workspaceId));
+    return r?.n ?? 0;
   }
 
   async listOrchestrators(workspaceId: string) {
@@ -393,6 +560,14 @@ export class DatabaseStorage implements IStorage {
     return conv;
   }
 
+  async updateChatConversation(id: string, title: string) {
+    const [conv] = await db.update(chatConversations)
+      .set({ title })
+      .where(eq(chatConversations.id, id))
+      .returning();
+    return conv;
+  }
+
   async deleteChatConversation(id: string) {
     await db.delete(chatConversations).where(eq(chatConversations.id, id));
   }
@@ -472,6 +647,282 @@ export class DatabaseStorage implements IStorage {
       runningTasks: counts["running"] ?? 0,
       pendingTasks: counts["pending"] ?? 0,
     };
+  }
+
+  async listScheduledJobs(workspaceId: string) {
+    return db.select().from(scheduledJobs).where(eq(scheduledJobs.workspaceId, workspaceId)).orderBy(desc(scheduledJobs.createdAt));
+  }
+
+  async listAllActiveScheduledJobs() {
+    return db.select().from(scheduledJobs).where(eq(scheduledJobs.isActive, true));
+  }
+
+  async getScheduledJob(id: string) {
+    const [job] = await db.select().from(scheduledJobs).where(eq(scheduledJobs.id, id));
+    return job;
+  }
+
+  async createScheduledJob(data: InsertScheduledJob) {
+    const [job] = await db.insert(scheduledJobs).values(data).returning();
+    return job;
+  }
+
+  async updateScheduledJob(id: string, data: Partial<ScheduledJob>) {
+    const [job] = await db.update(scheduledJobs).set(data).where(eq(scheduledJobs.id, id)).returning();
+    return job;
+  }
+
+  async deleteScheduledJob(id: string) {
+    await db.delete(scheduledJobs).where(eq(scheduledJobs.id, id));
+  }
+
+  async listOutboundChannels(orchestratorId: string): Promise<Channel[]> {
+    return db.select().from(channels).where(
+      and(
+        eq(channels.orchestratorId, orchestratorId),
+        eq(channels.isActive, true),
+        inArray(channels.type, ["slack", "teams", "google_chat", "generic_webhook"] as any),
+      )
+    );
+  }
+
+  async logChannelDelivery(data: { channelId: string; event: string; statusCode?: number; responseBody?: string; error?: string }): Promise<void> {
+    await db.insert(channelDeliveries).values({
+      channelId: data.channelId,
+      event: data.event,
+      statusCode: data.statusCode ?? null,
+      responseBody: data.responseBody ?? null,
+      error: data.error ?? null,
+    });
+  }
+
+  async listChannelDeliveries(channelId: string, limit = 50): Promise<ChannelDelivery[]> {
+    return db.select().from(channelDeliveries)
+      .where(eq(channelDeliveries.channelId, channelId))
+      .orderBy(desc(channelDeliveries.sentAt))
+      .limit(limit);
+  }
+
+  async listApprovalRequests(workspaceId: string, status?: string): Promise<ApprovalRequest[]> {
+    const conditions = [eq(approvalRequests.workspaceId, workspaceId)];
+    if (status) conditions.push(eq(approvalRequests.status, status));
+    return db.select().from(approvalRequests)
+      .where(and(...conditions))
+      .orderBy(desc(approvalRequests.createdAt));
+  }
+
+  async getApprovalRequest(id: string): Promise<ApprovalRequest | undefined> {
+    const [row] = await db.select().from(approvalRequests).where(eq(approvalRequests.id, id));
+    return row;
+  }
+
+  async createApprovalRequest(data: InsertApprovalRequest): Promise<ApprovalRequest> {
+    const [row] = await db.insert(approvalRequests).values(data).returning();
+    return row;
+  }
+
+  async resolveApprovalRequest(id: string, resolvedBy: string, resolution: string, status: "approved" | "rejected"): Promise<ApprovalRequest> {
+    const [row] = await db.update(approvalRequests)
+      .set({ status, resolvedBy, resolution, resolvedAt: new Date() })
+      .where(eq(approvalRequests.id, id))
+      .returning();
+    return row;
+  }
+
+  async countPendingApprovals(workspaceId: string): Promise<number> {
+    const [row] = await db.select({ count: sql<number>`count(*)::int` })
+      .from(approvalRequests)
+      .where(and(eq(approvalRequests.workspaceId, workspaceId), eq(approvalRequests.status, "pending")));
+    return row?.count ?? 0;
+  }
+
+  async listPipelines(workspaceId: string): Promise<Pipeline[]> {
+    return db.select().from(pipelines)
+      .where(eq(pipelines.workspaceId, workspaceId))
+      .orderBy(desc(pipelines.createdAt));
+  }
+
+  async getPipeline(id: string): Promise<Pipeline | undefined> {
+    const [row] = await db.select().from(pipelines).where(eq(pipelines.id, id));
+    return row;
+  }
+
+  async createPipeline(data: InsertPipeline): Promise<Pipeline> {
+    const [row] = await db.insert(pipelines).values(data).returning();
+    return row;
+  }
+
+  async updatePipeline(id: string, data: Partial<Pipeline>): Promise<Pipeline> {
+    const [row] = await db.update(pipelines).set(data).where(eq(pipelines.id, id)).returning();
+    return row;
+  }
+
+  async deletePipeline(id: string): Promise<void> {
+    await db.delete(pipelines).where(eq(pipelines.id, id));
+  }
+
+  async listPipelineSteps(pipelineId: string): Promise<PipelineStep[]> {
+    return db.select().from(pipelineSteps)
+      .where(eq(pipelineSteps.pipelineId, pipelineId))
+      .orderBy(pipelineSteps.stepOrder);
+  }
+
+  async createPipelineStep(data: InsertPipelineStep): Promise<PipelineStep> {
+    const [row] = await db.insert(pipelineSteps).values(data).returning();
+    return row;
+  }
+
+  async updatePipelineStep(id: string, data: Partial<PipelineStep>): Promise<PipelineStep> {
+    const [row] = await db.update(pipelineSteps).set(data).where(eq(pipelineSteps.id, id)).returning();
+    return row;
+  }
+
+  async deletePipelineStep(id: string): Promise<void> {
+    await db.delete(pipelineSteps).where(eq(pipelineSteps.id, id));
+  }
+
+  async deleteAllPipelineSteps(pipelineId: string): Promise<void> {
+    await db.delete(pipelineSteps).where(eq(pipelineSteps.pipelineId, pipelineId));
+  }
+
+  async listPipelineRuns(pipelineId: string, limit = 20): Promise<PipelineRun[]> {
+    return db.select().from(pipelineRuns)
+      .where(eq(pipelineRuns.pipelineId, pipelineId))
+      .orderBy(desc(pipelineRuns.createdAt))
+      .limit(limit);
+  }
+
+  async getPipelineRun(id: string): Promise<PipelineRun | undefined> {
+    const [row] = await db.select().from(pipelineRuns).where(eq(pipelineRuns.id, id));
+    return row;
+  }
+
+  async createPipelineRun(data: InsertPipelineRun): Promise<PipelineRun> {
+    const [row] = await db.insert(pipelineRuns).values(data).returning();
+    return row;
+  }
+
+  async updatePipelineRun(id: string, data: Partial<PipelineRun>): Promise<PipelineRun> {
+    const [row] = await db.update(pipelineRuns).set(data).where(eq(pipelineRuns.id, id)).returning();
+    return row;
+  }
+
+  async listPipelineStepRuns(runId: string): Promise<PipelineStepRun[]> {
+    return db.select().from(pipelineStepRuns)
+      .where(eq(pipelineStepRuns.runId, runId))
+      .orderBy(pipelineStepRuns.startedAt);
+  }
+
+  async createPipelineStepRun(data: Partial<PipelineStepRun> & { runId: string; stepId: string }): Promise<PipelineStepRun> {
+    const [row] = await db.insert(pipelineStepRuns).values({
+      runId: data.runId,
+      stepId: data.stepId,
+      taskId: data.taskId ?? null,
+      status: data.status ?? "pending",
+      startedAt: data.startedAt ?? new Date(),
+    }).returning();
+    return row;
+  }
+
+  async updatePipelineStepRun(id: string, data: Partial<PipelineStepRun>): Promise<PipelineStepRun> {
+    const [row] = await db.update(pipelineStepRuns).set(data).where(eq(pipelineStepRuns.id, id)).returning();
+    return row;
+  }
+
+  async createTokenUsage(data: InsertTokenUsage): Promise<TokenUsage> {
+    const [row] = await db.insert(tokenUsage).values(data).returning();
+    return row;
+  }
+
+  async getWorkspaceTokenStats(workspaceId: string, days = 30) {
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const rows = await db.select().from(tokenUsage)
+      .where(and(eq(tokenUsage.workspaceId, workspaceId), gte(tokenUsage.createdAt, since)))
+      .orderBy(desc(tokenUsage.createdAt));
+
+    const totalInputTokens = rows.reduce((s, r) => s + r.inputTokens, 0);
+    const totalOutputTokens = rows.reduce((s, r) => s + r.outputTokens, 0);
+    const totalCostUsd = rows.reduce((s, r) => s + (r.estimatedCostUsd ?? 0), 0);
+
+    const agentMap = new Map<string, { inputTokens: number; outputTokens: number; costUsd: number; calls: number }>();
+    for (const r of rows) {
+      const key = r.agentName ?? "Unknown";
+      const existing = agentMap.get(key) ?? { inputTokens: 0, outputTokens: 0, costUsd: 0, calls: 0 };
+      agentMap.set(key, {
+        inputTokens: existing.inputTokens + r.inputTokens,
+        outputTokens: existing.outputTokens + r.outputTokens,
+        costUsd: existing.costUsd + (r.estimatedCostUsd ?? 0),
+        calls: existing.calls + 1,
+      });
+    }
+    const byAgent = Array.from(agentMap.entries()).map(([agentName, stats]) => ({ agentName, ...stats }));
+
+    const dayMap = new Map<string, { inputTokens: number; outputTokens: number; costUsd: number }>();
+    for (const r of rows) {
+      const date = (r.createdAt ?? new Date()).toISOString().slice(0, 10);
+      const existing = dayMap.get(date) ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+      dayMap.set(date, {
+        inputTokens: existing.inputTokens + r.inputTokens,
+        outputTokens: existing.outputTokens + r.outputTokens,
+        costUsd: existing.costUsd + (r.estimatedCostUsd ?? 0),
+      });
+    }
+    const byDay = Array.from(dayMap.entries())
+      .map(([date, stats]) => ({ date, ...stats }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    const provMap = new Map<string, { inputTokens: number; outputTokens: number; costUsd: number }>();
+    for (const r of rows) {
+      const key = `${r.provider}::${r.model}`;
+      const existing = provMap.get(key) ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+      provMap.set(key, {
+        inputTokens: existing.inputTokens + r.inputTokens,
+        outputTokens: existing.outputTokens + r.outputTokens,
+        costUsd: existing.costUsd + (r.estimatedCostUsd ?? 0),
+      });
+    }
+    const byProvider = Array.from(provMap.entries()).map(([key, stats]) => {
+      const [provider, model] = key.split("::");
+      return { provider, model, ...stats };
+    });
+
+    return { totalInputTokens, totalOutputTokens, totalCostUsd, byAgent, byDay, byProvider, recentUsage: rows.slice(0, 50) };
+  }
+
+  async getChannelById(id: string) {
+    return this.getChannel(id);
+  }
+
+  async getOrchestratorForChannel(channelId: string): Promise<Orchestrator | undefined> {
+    const [ch] = await db.select().from(channels).where(eq(channels.id, channelId));
+    if (!ch) return undefined;
+    return this.getOrchestrator(ch.orchestratorId);
+  }
+
+  async createCommsThread(data: InsertCommsThread): Promise<CommsThread> {
+    const [thread] = await db.insert(commsThreads).values(data).returning();
+    return thread;
+  }
+
+  async getCommsThread(channelId: string, externalThreadId: string): Promise<CommsThread | undefined> {
+    const [thread] = await db.select().from(commsThreads).where(
+      and(eq(commsThreads.channelId, channelId), eq(commsThreads.externalThreadId, externalThreadId)),
+    );
+    return thread;
+  }
+
+  async getCommsThreadById(id: string): Promise<CommsThread | undefined> {
+    const [thread] = await db.select().from(commsThreads).where(eq(commsThreads.id, id));
+    return thread;
+  }
+
+  async touchCommsThread(id: string): Promise<void> {
+    await db.update(commsThreads).set({ lastActivityAt: new Date() }).where(eq(commsThreads.id, id));
+  }
+
+  async updateCommsThreadRef(id: string, ref: Record<string, string>): Promise<void> {
+    await db.update(commsThreads).set({ conversationRef: ref, lastActivityAt: new Date() }).where(eq(commsThreads.id, id));
   }
 }
 

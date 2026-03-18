@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Plus, Bot, Trash2, Edit, Brain, Thermometer, Wrench, ChevronDown, ChevronRight, Database, Cloud, Timer } from "lucide-react";
+import { Plus, Bot, Trash2, Edit, Brain, Thermometer, Wrench, ChevronDown, ChevronRight, Database, Cloud, Timer, GitBranch } from "lucide-react";
+import { SiJira, SiGithub, SiGitlab } from "react-icons/si";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -66,6 +67,34 @@ const PROVIDER_TOOLS: Record<string, { name: string; label: string; description:
     { name: "azure_list_virtual_machines", label: "List Virtual Machines", description: "List Azure VMs" },
     { name: "azure_list_storage_accounts", label: "List Storage Accounts", description: "List Azure storage accounts" },
   ],
+  jira: [
+    { name: "jira_list_projects", label: "List Projects", description: "List all accessible Jira projects" },
+    { name: "jira_search_issues", label: "Search Issues (JQL)", description: "Search issues using JQL" },
+    { name: "jira_get_issue", label: "Get Issue", description: "Get full details of a Jira issue" },
+    { name: "jira_create_issue", label: "Create Issue", description: "Create a Bug, Task, Story, or Epic" },
+    { name: "jira_update_issue", label: "Update Issue", description: "Update summary, status, priority or assignee" },
+    { name: "jira_add_comment", label: "Add Comment", description: "Add a comment to a Jira issue" },
+    { name: "jira_list_sprints", label: "List Sprints", description: "List sprints for a board" },
+  ],
+  github: [
+    { name: "github_list_repos", label: "List Repos", description: "List repositories for a user or org" },
+    { name: "github_list_issues", label: "List Issues", description: "List issues in a repository" },
+    { name: "github_get_issue", label: "Get Issue", description: "Get full details of an issue" },
+    { name: "github_create_issue", label: "Create Issue", description: "Create a new GitHub issue" },
+    { name: "github_list_pull_requests", label: "List Pull Requests", description: "List PRs in a repository" },
+    { name: "github_create_pull_request", label: "Create Pull Request", description: "Open a new PR between branches" },
+    { name: "github_list_workflow_runs", label: "List Workflow Runs", description: "List GitHub Actions workflow runs" },
+  ],
+  gitlab: [
+    { name: "gitlab_list_projects", label: "List Projects", description: "List accessible GitLab projects" },
+    { name: "gitlab_list_issues", label: "List Issues", description: "List issues in a project" },
+    { name: "gitlab_get_issue", label: "Get Issue", description: "Get full details of an issue" },
+    { name: "gitlab_create_issue", label: "Create Issue", description: "Create a new GitLab issue" },
+    { name: "gitlab_list_merge_requests", label: "List Merge Requests", description: "List MRs in a project" },
+    { name: "gitlab_create_merge_request", label: "Create Merge Request", description: "Open a new MR" },
+    { name: "gitlab_list_pipelines", label: "List Pipelines", description: "List CI/CD pipelines" },
+    { name: "gitlab_trigger_pipeline", label: "Trigger Pipeline", description: "Trigger a CI/CD pipeline" },
+  ],
 };
 
 const PROVIDER_ICONS: Record<string, { icon: any; color: string; bg: string }> = {
@@ -73,6 +102,9 @@ const PROVIDER_ICONS: Record<string, { icon: any; color: string; bg: string }> =
   aws: { icon: Cloud, color: "text-orange-400", bg: "bg-orange-500/10" },
   gcp: { icon: Cloud, color: "text-blue-400", bg: "bg-blue-500/10" },
   azure: { icon: Cloud, color: "text-sky-400", bg: "bg-sky-500/10" },
+  jira: { icon: SiJira, color: "text-blue-600", bg: "bg-blue-600/10" },
+  github: { icon: SiGithub, color: "text-gray-300", bg: "bg-gray-500/10" },
+  gitlab: { icon: SiGitlab, color: "text-orange-400", bg: "bg-orange-400/10" },
 };
 
 function ToolsPicker({ workspaceId, selected, onChange }: {

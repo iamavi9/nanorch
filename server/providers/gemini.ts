@@ -27,7 +27,7 @@ export async function runGemini(options: RunAgentOptions): Promise<RunAgentResul
 
   const tools =
     options.tools && options.tools.length > 0
-      ? [{ functionDeclarations: options.tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })) }]
+      ? ([{ functionDeclarations: options.tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })) }] as any)
       : undefined;
 
   if (tools && tools.length > 0) {
@@ -61,6 +61,9 @@ export async function runGemini(options: RunAgentOptions): Promise<RunAgentResul
     return {
       content: text,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage: res.usageMetadata
+        ? { inputTokens: res.usageMetadata.promptTokenCount ?? 0, outputTokens: res.usageMetadata.candidatesTokenCount ?? 0 }
+        : undefined,
     };
   }
 
@@ -75,12 +78,21 @@ export async function runGemini(options: RunAgentOptions): Promise<RunAgentResul
   });
 
   let fullResponse = "";
+  let inputTokens = 0;
+  let outputTokens = 0;
   for await (const chunk of stream) {
     const text = chunk.text ?? "";
     if (text) {
       fullResponse += text;
       options.onChunk?.(text);
     }
+    if (chunk.usageMetadata) {
+      inputTokens = chunk.usageMetadata.promptTokenCount ?? 0;
+      outputTokens = chunk.usageMetadata.candidatesTokenCount ?? 0;
+    }
   }
-  return { content: fullResponse };
+  return {
+    content: fullResponse,
+    usage: inputTokens > 0 ? { inputTokens, outputTokens } : undefined,
+  };
 }

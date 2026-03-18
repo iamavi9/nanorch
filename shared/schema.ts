@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, boolean, timestamp, jsonb, serial, pgEnum, unique } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, boolean, timestamp, jsonb, serial, pgEnum, unique, real } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -7,9 +7,9 @@ export const userRoleEnum = pgEnum("user_role", ["admin", "member"]);
 export const providerEnum = pgEnum("provider", ["openai", "anthropic", "gemini", "ollama"]);
 export const orchestratorStatusEnum = pgEnum("orchestrator_status", ["active", "paused"]);
 export const taskStatusEnum = pgEnum("task_status", ["pending", "running", "completed", "failed"]);
-export const channelTypeEnum = pgEnum("channel_type", ["webhook", "api"]);
+export const channelTypeEnum = pgEnum("channel_type", ["webhook", "api", "slack", "teams", "google_chat", "generic_webhook"]);
 export const logLevelEnum = pgEnum("log_level", ["info", "warn", "error"]);
-export const cloudProviderEnum = pgEnum("cloud_provider", ["aws", "gcp", "azure", "ragflow"]);
+export const cloudProviderEnum = pgEnum("cloud_provider", ["aws", "gcp", "azure", "ragflow", "jira", "github", "gitlab", "teams"]);
 
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -27,6 +27,7 @@ export const workspaces = pgTable("workspaces", {
   slug: varchar("slug").notNull().unique(),
   description: text("description"),
   ownerId: varchar("owner_id").references(() => users.id),
+  isCommsWorkspace: boolean("is_comms_workspace").default(false),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -78,6 +79,16 @@ export const channels = pgTable("channels", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const channelDeliveries = pgTable("channel_deliveries", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  channelId: varchar("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  event: text("event").notNull(),
+  statusCode: integer("status_code"),
+  responseBody: text("response_body"),
+  error: text("error"),
+  sentAt: timestamp("sent_at").defaultNow(),
+});
+
 export const tasks = pgTable("tasks", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   orchestratorId: varchar("orchestrator_id").notNull().references(() => orchestrators.id, { onDelete: "cascade" }),
@@ -88,6 +99,8 @@ export const tasks = pgTable("tasks", {
   status: taskStatusEnum("status").default("pending"),
   priority: integer("priority").default(5),
   intent: varchar("intent"),
+  parentTaskId: varchar("parent_task_id"),
+  commsThreadId: varchar("comms_thread_id"),
   errorMessage: text("error_message"),
   createdAt: timestamp("created_at").defaultNow(),
   startedAt: timestamp("started_at"),
@@ -144,6 +157,22 @@ export const chatMessages = pgTable("chat_messages", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const scheduledJobs = pgTable("scheduled_jobs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  orchestratorId: varchar("orchestrator_id").notNull().references(() => orchestrators.id, { onDelete: "cascade" }),
+  agentId: varchar("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  prompt: text("prompt").notNull(),
+  cronExpression: varchar("cron_expression").notNull(),
+  timezone: varchar("timezone").default("UTC"),
+  isActive: boolean("is_active").default(true),
+  lastRunAt: timestamp("last_run_at"),
+  nextRunAt: timestamp("next_run_at"),
+  lastTaskId: varchar("last_task_id"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true });
 export const insertWorkspaceSchema = createInsertSchema(workspaces).omit({ id: true, createdAt: true });
 export const insertOrchestratorSchema = createInsertSchema(orchestrators).omit({ id: true, createdAt: true });
@@ -177,3 +206,143 @@ export type ChatConversation = typeof chatConversations.$inferSelect;
 export type InsertChatConversation = z.infer<typeof insertChatConversationSchema>;
 export type ChatMessage = typeof chatMessages.$inferSelect;
 export type InsertChatMessage = z.infer<typeof insertChatMessageSchema>;
+
+export const insertScheduledJobSchema = createInsertSchema(scheduledJobs).omit({ id: true, createdAt: true, lastRunAt: true, nextRunAt: true, lastTaskId: true });
+export type ScheduledJob = typeof scheduledJobs.$inferSelect;
+export type InsertScheduledJob = z.infer<typeof insertScheduledJobSchema>;
+
+export type ChannelDelivery = typeof channelDeliveries.$inferSelect;
+
+export const approvalRequests = pgTable("approval_requests", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  taskId: varchar("task_id").references(() => tasks.id, { onDelete: "set null" }),
+  agentId: varchar("agent_id").references(() => agents.id, { onDelete: "set null" }),
+  agentName: text("agent_name"),
+  message: text("message").notNull(),
+  action: text("action").notNull(),
+  impact: text("impact"),
+  status: text("status").notNull().default("pending"),
+  resolvedBy: varchar("resolved_by"),
+  resolution: text("resolution"),
+  resolvedAt: timestamp("resolved_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const pipelines = pgTable("pipelines", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  orchestratorId: varchar("orchestrator_id").notNull().references(() => orchestrators.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  description: text("description"),
+  isActive: boolean("is_active").default(true),
+  cronExpression: varchar("cron_expression"),
+  timezone: varchar("timezone").default("UTC"),
+  lastRunAt: timestamp("last_run_at"),
+  nextRunAt: timestamp("next_run_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const pipelineSteps = pgTable("pipeline_steps", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  pipelineId: varchar("pipeline_id").notNull().references(() => pipelines.id, { onDelete: "cascade" }),
+  agentId: varchar("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  promptTemplate: text("prompt_template").notNull(),
+  stepOrder: integer("step_order").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const pipelineRuns = pgTable("pipeline_runs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  pipelineId: varchar("pipeline_id").notNull().references(() => pipelines.id, { onDelete: "cascade" }),
+  status: text("status").notNull().default("pending"),
+  triggeredBy: text("triggered_by").default("manual"),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  error: text("error"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const pipelineStepRuns = pgTable("pipeline_step_runs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  runId: varchar("run_id").notNull().references(() => pipelineRuns.id, { onDelete: "cascade" }),
+  stepId: varchar("step_id").notNull().references(() => pipelineSteps.id, { onDelete: "cascade" }),
+  taskId: varchar("task_id").references(() => tasks.id, { onDelete: "set null" }),
+  status: text("status").notNull().default("pending"),
+  output: text("output"),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  error: text("error"),
+});
+
+export const tokenUsage = pgTable("token_usage", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  taskId: varchar("task_id").references(() => tasks.id, { onDelete: "set null" }),
+  agentId: varchar("agent_id").references(() => agents.id, { onDelete: "set null" }),
+  agentName: text("agent_name"),
+  provider: text("provider").notNull(),
+  model: text("model").notNull(),
+  inputTokens: integer("input_tokens").notNull().default(0),
+  outputTokens: integer("output_tokens").notNull().default(0),
+  estimatedCostUsd: real("estimated_cost_usd").default(0),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertApprovalRequestSchema = createInsertSchema(approvalRequests).omit({ id: true, createdAt: true, resolvedAt: true });
+export type ApprovalRequest = typeof approvalRequests.$inferSelect;
+export type InsertApprovalRequest = z.infer<typeof insertApprovalRequestSchema>;
+
+export const insertPipelineSchema = createInsertSchema(pipelines).omit({ id: true, createdAt: true, lastRunAt: true, nextRunAt: true });
+export type Pipeline = typeof pipelines.$inferSelect;
+export type InsertPipeline = z.infer<typeof insertPipelineSchema>;
+
+export const insertPipelineStepSchema = createInsertSchema(pipelineSteps).omit({ id: true, createdAt: true });
+export type PipelineStep = typeof pipelineSteps.$inferSelect;
+export type InsertPipelineStep = z.infer<typeof insertPipelineStepSchema>;
+
+export const insertPipelineRunSchema = createInsertSchema(pipelineRuns).omit({ id: true, createdAt: true, startedAt: true, completedAt: true });
+export type PipelineRun = typeof pipelineRuns.$inferSelect;
+export type InsertPipelineRun = z.infer<typeof insertPipelineRunSchema>;
+
+export const insertPipelineStepRunSchema = createInsertSchema(pipelineStepRuns).omit({ id: true });
+export type PipelineStepRun = typeof pipelineStepRuns.$inferSelect;
+
+export const insertTokenUsageSchema = createInsertSchema(tokenUsage).omit({ id: true, createdAt: true });
+export type TokenUsage = typeof tokenUsage.$inferSelect;
+export type InsertTokenUsage = z.infer<typeof insertTokenUsageSchema>;
+
+export const workspaceConfig = pgTable("workspace_config", {
+  workspaceId: varchar("workspace_id").primaryKey().references(() => workspaces.id, { onDelete: "cascade" }),
+  maxOrchestrators: integer("max_orchestrators"),
+  maxAgents: integer("max_agents"),
+  maxChannels: integer("max_channels"),
+  maxScheduledJobs: integer("max_scheduled_jobs"),
+  allowedAiProviders: text("allowed_ai_providers").array(),
+  allowedCloudProviders: text("allowed_cloud_providers").array(),
+  allowedChannelTypes: text("allowed_channel_types").array(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertWorkspaceConfigSchema = createInsertSchema(workspaceConfig);
+export type WorkspaceConfig = typeof workspaceConfig.$inferSelect;
+export type InsertWorkspaceConfig = z.infer<typeof insertWorkspaceConfigSchema>;
+
+export const commsThreads = pgTable("comms_threads", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  channelId: varchar("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  externalThreadId: text("external_thread_id").notNull(),
+  externalChannelId: text("external_channel_id"),
+  externalUserId: text("external_user_id"),
+  externalUserName: text("external_user_name"),
+  agentId: varchar("agent_id").references(() => agents.id, { onDelete: "set null" }),
+  platform: text("platform").notNull(),
+  conversationRef: jsonb("conversation_ref").default({}),
+  createdAt: timestamp("created_at").defaultNow(),
+  lastActivityAt: timestamp("last_activity_at").defaultNow(),
+});
+
+export const insertCommsThreadSchema = createInsertSchema(commsThreads).omit({ id: true, createdAt: true });
+export type CommsThread = typeof commsThreads.$inferSelect;
+export type InsertCommsThread = z.infer<typeof insertCommsThreadSchema>;

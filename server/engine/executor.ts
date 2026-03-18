@@ -5,10 +5,27 @@ import type { Orchestrator, Agent } from "@shared/schema";
 import { taskLogEmitter } from "./emitter";
 import { decrypt } from "../lib/encryption";
 import { executeCloudTool, type CloudCredentials } from "../cloud/executor";
-import { getToolsForProvider, detectProviderFromToolName, CODE_INTERPRETER_TOOL } from "../cloud/tools";
+import { getToolsForProvider, detectProviderFromToolName, CODE_INTERPRETER_TOOL, REQUEST_APPROVAL_TOOL } from "../cloud/tools";
 import { sanitizeToolArgs } from "../lib/mountAllowlist";
 import { isDockerAvailable, executeTaskInDocker } from "./docker-executor";
 import { runCode } from "./sandbox-executor";
+import { dispatchNotification } from "./notifier";
+import { dispatchCommsReply } from "../comms/comms-reply";
+
+function estimateTokenCost(provider: string, model: string, inputTokens: number, outputTokens: number): number {
+  const pricing: Record<string, { input: number; output: number }> = {
+    "openai:gpt-4o": { input: 2.50, output: 10.00 },
+    "openai:gpt-4o-mini": { input: 0.15, output: 0.60 },
+    "openai:gpt-4-turbo": { input: 10.00, output: 30.00 },
+    "anthropic:claude-opus-4-5": { input: 15.00, output: 75.00 },
+    "anthropic:claude-sonnet-4-5": { input: 3.00, output: 15.00 },
+    "anthropic:claude-haiku-4-5": { input: 0.25, output: 1.25 },
+    "gemini:gemini-2.5-pro": { input: 1.25, output: 5.00 },
+    "gemini:gemini-2.5-flash": { input: 0.075, output: 0.30 },
+  };
+  const rates = pricing[`${provider}:${model}`] ?? { input: 1.00, output: 3.00 };
+  return (inputTokens * rates.input + outputTokens * rates.output) / 1_000_000;
+}
 
 const MAX_TOOL_ROUNDS = 10;
 
@@ -60,6 +77,9 @@ export async function executeTask(taskId: string): Promise<void> {
     await log("info", `Running agent${agent ? ` "${agent.name}"` : ""} with ${messages.length} message(s)`);
 
     let output = "";
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let approvalRequested = false;
 
     if (availableTools.length === 0) {
       const result = await runAgent({
@@ -75,6 +95,10 @@ export async function executeTask(taskId: string): Promise<void> {
         },
       });
       output = result.content;
+      if (result.usage) {
+        totalInputTokens += result.usage.inputTokens;
+        totalOutputTokens += result.usage.outputTokens;
+      }
     } else {
       let toolRounds = 0;
       let done = false;
@@ -91,6 +115,11 @@ export async function executeTask(taskId: string): Promise<void> {
           tools: availableTools,
         });
 
+        if (result.usage) {
+          totalInputTokens += result.usage.inputTokens;
+          totalOutputTokens += result.usage.outputTokens;
+        }
+
         if (!result.toolCalls || result.toolCalls.length === 0) {
           output = result.content;
           taskLogEmitter.emit(`task:${taskId}:stream`, output);
@@ -103,17 +132,41 @@ export async function executeTask(taskId: string): Promise<void> {
         }
 
         for (const toolCall of result.toolCalls) {
+          if (toolCall.name === "request_approval") {
+            const { message, action, impact } = toolCall.arguments as { message: string; action: string; impact?: string };
+            await log("warn", `Approval gate triggered: ${action}`, { message, action, impact });
+            const approvalReq = await storage.createApprovalRequest({
+              workspaceId: orchestrator.workspaceId,
+              taskId,
+              agentId: agent?.id ?? null,
+              agentName: agent?.name ?? "Agent",
+              message,
+              action,
+              impact: impact ?? null,
+              status: "pending",
+            });
+            messages.push({
+              role: "user",
+              content: `Tool request_approval result: {"status":"pending","approvalId":"${approvalReq.id}","message":"Approval request created. A human must review and approve or reject this before you proceed."}`,
+            });
+            approvalRequested = true;
+            dispatchNotification(orchestrator.id, "task.approval_requested", {
+              taskId, agentName: agent?.name, approvalId: approvalReq.id, action, message,
+            }).catch(console.error);
+            continue;
+          }
+
           if (toolCall.name === "code_interpreter") {
             const { language, code } = toolCall.arguments as { language: string; code: string };
             const sandboxTimeout = agent?.sandboxTimeoutSeconds ?? undefined;
             await log("info", `Running ${language} code${sandboxTimeout ? ` (timeout: ${sandboxTimeout}s)` : ""}`);
             try {
               const sandboxResult = await runCode(language, code, sandboxTimeout);
-              const output = sandboxResult.exitCode === 0
+              const codeOutput = sandboxResult.exitCode === 0
                 ? `exit_code: 0\nstdout:\n${sandboxResult.stdout || "(no output)"}`
                 : `exit_code: ${sandboxResult.exitCode}\nstdout:\n${sandboxResult.stdout || "(no output)"}\nstderr:\n${sandboxResult.stderr || "(none)"}`;
               await log("info", `Code execution completed (exit ${sandboxResult.exitCode})`);
-              messages.push({ role: "user", content: `Tool code_interpreter result:\n${output}` });
+              messages.push({ role: "user", content: `Tool code_interpreter result:\n${codeOutput}` });
             } catch (err: any) {
               await log("error", `Code execution failed: ${err.message}`);
               messages.push({ role: "user", content: `Tool code_interpreter result: ERROR — ${err?.message ?? String(err)}` });
@@ -164,10 +217,14 @@ export async function executeTask(taskId: string): Promise<void> {
           },
         });
         output = finalResult.content;
+        if (finalResult.usage) {
+          totalInputTokens += finalResult.usage.inputTokens;
+          totalOutputTokens += finalResult.usage.outputTokens;
+        }
       }
     }
 
-    await log("info", `Task completed — output length: ${output.length} chars`);
+    await log("info", `Task completed — output length: ${output.length} chars${approvalRequested ? " (approval pending)" : ""}`);
 
     if (agent?.memoryEnabled && agent) {
       await storage.setAgentMemory(agent.id, `last_output_${Date.now()}`, output.slice(0, 500));
@@ -178,6 +235,32 @@ export async function executeTask(taskId: string): Promise<void> {
       output,
       completedAt: new Date(),
     });
+
+    if (totalInputTokens > 0 || totalOutputTokens > 0) {
+      const costUsd = estimateTokenCost(orchestrator.provider, orchestrator.model, totalInputTokens, totalOutputTokens);
+      await storage.createTokenUsage({
+        workspaceId: orchestrator.workspaceId,
+        taskId,
+        agentId: agent?.id ?? null,
+        agentName: agent?.name ?? null,
+        provider: orchestrator.provider,
+        model: orchestrator.model,
+        inputTokens: totalInputTokens,
+        outputTokens: totalOutputTokens,
+        estimatedCostUsd: costUsd,
+      }).catch(console.error);
+      await log("info", `Token usage: ${totalInputTokens} in / ${totalOutputTokens} out (~$${costUsd.toFixed(6)})`);
+    }
+
+    dispatchNotification(orchestrator.id, "task.completed", {
+      taskId,
+      agentName: agent?.name,
+      summary: output.slice(0, 300),
+    }).catch(console.error);
+
+    if (task.commsThreadId) {
+      dispatchCommsReply(task.commsThreadId, output).catch(console.error);
+    }
   } catch (err: any) {
     const message = err?.message ?? String(err);
     await log("error", `Task failed: ${message}`);
@@ -186,12 +269,15 @@ export async function executeTask(taskId: string): Promise<void> {
       errorMessage: message,
       completedAt: new Date(),
     });
+    dispatchNotification(orchestrator.id, "task.failed", {
+      taskId,
+      agentName: agent?.name,
+      error: message,
+    }).catch(console.error);
   }
 }
 
-interface LoadedCredential extends CloudCredentials {
-  integrationId: string;
-}
+type LoadedCredential = CloudCredentials & { integrationId: string };
 
 async function loadCloudCredentials(
   workspaceId: string,
@@ -241,6 +327,42 @@ async function loadCloudCredentials(
             apiKey: raw.apiKey,
           },
         });
+      } else if (integration.provider === "jira") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "jira",
+          credentials: {
+            baseUrl: raw.baseUrl,
+            email: raw.email,
+            apiToken: raw.apiToken,
+            defaultProjectKey: raw.defaultProjectKey,
+          },
+        });
+      } else if (integration.provider === "github") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "github",
+          credentials: {
+            token: raw.token,
+            defaultOwner: raw.defaultOwner,
+          },
+        });
+      } else if (integration.provider === "gitlab") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "gitlab",
+          credentials: {
+            baseUrl: raw.baseUrl,
+            token: raw.token,
+            defaultProjectId: raw.defaultProjectId,
+          },
+        });
+      } else if (integration.provider === "teams") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "teams",
+          credentials: { webhookUrl: raw.webhookUrl },
+        });
       }
     } catch {
       await log("warn", `Failed to load credentials for integration "${integration.name}" — skipping`);
@@ -251,7 +373,7 @@ async function loadCloudCredentials(
 }
 
 function buildToolList(creds: LoadedCredential[], includeCodeInterpreter = false): ToolDefinition[] {
-  const tools: ToolDefinition[] = [];
+  const tools: ToolDefinition[] = [REQUEST_APPROVAL_TOOL];
   if (includeCodeInterpreter) {
     tools.push(CODE_INTERPRETER_TOOL);
   }
@@ -274,8 +396,8 @@ function buildSystemPrompt(orchestrator: Orchestrator, agent: Agent | null, hasC
 
   if (hasCloudTools) {
     parts.push(
-      `You have access to cloud tools for AWS, GCP, and/or Azure. When the user asks about cloud resources, ` +
-      `use the appropriate tool to fetch real data and provide accurate, up-to-date information. ` +
+      `You have access to tools for cloud providers and developer platforms (AWS, GCP, Azure, RAGFlow, Jira, GitHub, GitLab). ` +
+      `When the user asks about resources or operations on any of these platforms, use the appropriate tool to fetch real data. ` +
       `Always summarize tool results in a clear, human-readable format.`
     );
   }

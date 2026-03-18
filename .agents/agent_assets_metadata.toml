@@ -1,0 +1,14 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "JGtd9-wfui7k3Vku95n-6"
+uri = "file://USAGE.md"
+type = "text"
+title = "NanoOrch Usage Guide"
+
+[[outputs]]
+id = "8AT9Yi904ayIadUQbl2SM"
+uri = "file://NanoOrch_User_Manual.docx"
+type = "word_document"
+title = "NanoOrch User Manual (.docx)"

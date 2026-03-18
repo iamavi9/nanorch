@@ -13,7 +13,13 @@ function getKey(): Buffer {
     return scryptSync(encKey, "nanoclaw-salt", 32);
   }
 
-  const sessionSecret = loadSecret("SESSION_SECRET") ?? "nanoclaw-default-secret-change-me";
+  const sessionSecret = loadSecret("SESSION_SECRET");
+  if (!sessionSecret) {
+    throw new Error(
+      "[encryption] Neither ENCRYPTION_KEY nor SESSION_SECRET is set. " +
+      "Set at least SESSION_SECRET (or preferably ENCRYPTION_KEY) before starting the app.",
+    );
+  }
   return scryptSync(sessionSecret, "nanoclaw-salt", 32);
 }
 

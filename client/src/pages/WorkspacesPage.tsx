@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { APP_NAME, APP_TAGLINE } from "@/lib/config";
-import { Plus, Network, Zap, Trash2, Moon, Sun } from "lucide-react";
+import { Plus, Network, Zap, Trash2, Moon, Sun, Settings2, ShieldAlert, Pencil, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -11,26 +11,242 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useTheme } from "@/components/ThemeProvider";
-import type { Workspace } from "@shared/schema";
+import { useAuth } from "@/hooks/useAuth";
+import type { Workspace, WorkspaceConfig } from "@shared/schema";
+
+const AI_PROVIDERS = ["openai", "anthropic", "gemini", "ollama"] as const;
+const CLOUD_PROVIDERS = ["aws", "gcp", "azure", "jira", "github", "gitlab", "ragflow", "teams"] as const;
+const CHANNEL_TYPES = ["api", "webhook", "slack", "teams", "google_chat", "generic_webhook"] as const;
+
+type QuotaData = {
+  config: WorkspaceConfig | null;
+  counts: { orchestrators: number; agents: number; channels: number; scheduledJobs: number };
+};
+
+function QuotaBar({ label, count, max }: { label: string; count: number; max: number | null }) {
+  if (max == null) return null;
+  const pct = Math.min(100, (count / max) * 100);
+  const near = pct >= 80;
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span className="w-28 text-muted-foreground shrink-0">{label}</span>
+      <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
+        <div className={`h-full rounded-full transition-all ${near ? "bg-destructive" : "bg-primary"}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className={`w-14 text-right tabular-nums ${near ? "text-destructive font-medium" : "text-muted-foreground"}`}>{count}/{max}</span>
+    </div>
+  );
+}
+
+function ProviderGroup({
+  label, allOptions, value, onChange,
+}: {
+  label: string;
+  allOptions: readonly string[];
+  value: string[] | null;
+  onChange: (v: string[] | null) => void;
+}) {
+  const restricted = value !== null;
+  const checked = value ?? [...allOptions];
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <Label className="text-sm font-medium">{label}</Label>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">{restricted ? "Restricted" : "All allowed"}</span>
+          <Switch
+            checked={restricted}
+            onCheckedChange={(on) => onChange(on ? [...allOptions] : null)}
+            data-testid={`switch-restrict-${label.toLowerCase().replace(/\s/g, "-")}`}
+          />
+        </div>
+      </div>
+      {restricted && (
+        <div className="grid grid-cols-2 gap-2 pl-1">
+          {allOptions.map((opt) => (
+            <div key={opt} className="flex items-center gap-2">
+              <Checkbox
+                id={`${label}-${opt}`}
+                checked={checked.includes(opt)}
+                onCheckedChange={(c) => {
+                  const next = c ? [...checked, opt] : checked.filter((x) => x !== opt);
+                  onChange(next.length === 0 ? [] : next);
+                }}
+                data-testid={`checkbox-${label.toLowerCase().replace(/\s/g, "-")}-${opt}`}
+              />
+              <label htmlFor={`${label}-${opt}`} className="text-xs capitalize cursor-pointer">{opt}</label>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WorkspaceLimitsModal({ workspace, onClose }: { workspace: Workspace; onClose: () => void }) {
+  const { toast } = useToast();
+
+  const { data: quota, isLoading } = useQuery<QuotaData>({
+    queryKey: [`/api/workspaces/${workspace.id}/quota`],
+  });
+
+  const [maxOrch, setMaxOrch] = useState<string>("");
+  const [maxAgents, setMaxAgents] = useState<string>("");
+  const [maxChannels, setMaxChannels] = useState<string>("");
+  const [maxJobs, setMaxJobs] = useState<string>("");
+  const [aiProviders, setAiProviders] = useState<string[] | null>(null);
+  const [cloudProviders, setCloudProviders] = useState<string[] | null>(null);
+  const [channelTypes, setChannelTypes] = useState<string[] | null>(null);
+  const [initialised, setInitialised] = useState(false);
+
+  if (quota && !initialised) {
+    const cfg = quota.config;
+    setMaxOrch(cfg?.maxOrchestrators != null ? String(cfg.maxOrchestrators) : "");
+    setMaxAgents(cfg?.maxAgents != null ? String(cfg.maxAgents) : "");
+    setMaxChannels(cfg?.maxChannels != null ? String(cfg.maxChannels) : "");
+    setMaxJobs(cfg?.maxScheduledJobs != null ? String(cfg.maxScheduledJobs) : "");
+    setAiProviders(cfg?.allowedAiProviders ?? null);
+    setCloudProviders(cfg?.allowedCloudProviders ?? null);
+    setChannelTypes(cfg?.allowedChannelTypes ?? null);
+    setInitialised(true);
+  }
+
+  const saveMutation = useMutation({
+    mutationFn: (data: object) => apiRequest("PUT", `/api/workspaces/${workspace.id}/config`, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/workspaces/${workspace.id}/quota`] });
+      toast({ title: "Limits saved" });
+      onClose();
+    },
+    onError: (err: any) => toast({ title: "Error", description: err.message, variant: "destructive" }),
+  });
+
+  const toInt = (s: string) => { const n = parseInt(s); return isNaN(n) || n < 0 ? null : n; };
+
+  const handleSave = () => {
+    saveMutation.mutate({
+      maxOrchestrators: toInt(maxOrch),
+      maxAgents: toInt(maxAgents),
+      maxChannels: toInt(maxChannels),
+      maxScheduledJobs: toInt(maxJobs),
+      allowedAiProviders: aiProviders,
+      allowedCloudProviders: cloudProviders,
+      allowedChannelTypes: channelTypes,
+    });
+  };
+
+  const counts = quota?.counts;
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <ShieldAlert className="w-4 h-4 text-primary" />
+            Workspace Limits — {workspace.name}
+          </DialogTitle>
+        </DialogHeader>
+
+        {isLoading ? (
+          <div className="space-y-2 py-4">{[1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-6" />)}</div>
+        ) : (
+          <Tabs defaultValue="quotas">
+            <TabsList className="w-full">
+              <TabsTrigger value="quotas" className="flex-1">Resource Quotas</TabsTrigger>
+              <TabsTrigger value="providers" className="flex-1">Allowed Providers</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="quotas" className="space-y-4 pt-4">
+              <p className="text-xs text-muted-foreground">Leave blank for unlimited. Current usage shown below each field.</p>
+
+              {(["orchestrators", "agents", "channels", "scheduledJobs"] as const).map((key) => {
+                const labelMap = { orchestrators: "Orchestrators", agents: "Agents", channels: "Channels", scheduledJobs: "Scheduled Jobs" };
+                const stateMap = {
+                  orchestrators: { val: maxOrch, set: setMaxOrch, testId: "input-max-orchestrators" },
+                  agents: { val: maxAgents, set: setMaxAgents, testId: "input-max-agents" },
+                  channels: { val: maxChannels, set: setMaxChannels, testId: "input-max-channels" },
+                  scheduledJobs: { val: maxJobs, set: setMaxJobs, testId: "input-max-jobs" },
+                };
+                const maxMap = {
+                  orchestrators: toInt(maxOrch),
+                  agents: toInt(maxAgents),
+                  channels: toInt(maxChannels),
+                  scheduledJobs: toInt(maxJobs),
+                };
+                const { val, set, testId } = stateMap[key];
+                return (
+                  <div key={key} className="space-y-1.5">
+                    <Label className="text-sm">{labelMap[key]}</Label>
+                    <Input
+                      type="number" min={0} placeholder="Unlimited"
+                      value={val} onChange={(e) => set(e.target.value)}
+                      data-testid={testId}
+                    />
+                    {counts && <QuotaBar label="Current usage" count={counts[key]} max={maxMap[key]} />}
+                  </div>
+                );
+              })}
+            </TabsContent>
+
+            <TabsContent value="providers" className="space-y-5 pt-4">
+              <p className="text-xs text-muted-foreground">Toggle "Restricted" to choose exactly which providers are allowed. When unrestricted, all providers are available.</p>
+              <ProviderGroup label="AI Providers" allOptions={AI_PROVIDERS} value={aiProviders} onChange={setAiProviders} />
+              <ProviderGroup label="Cloud Integrations" allOptions={CLOUD_PROVIDERS} value={cloudProviders} onChange={setCloudProviders} />
+              <ProviderGroup label="Channel Types" allOptions={CHANNEL_TYPES} value={channelTypes} onChange={setChannelTypes} />
+            </TabsContent>
+          </Tabs>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleSave} disabled={saveMutation.isPending || isLoading} data-testid="button-save-limits">
+            {saveMutation.isPending ? "Saving..." : "Save Limits"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 export default function WorkspacesPage() {
   const { toast } = useToast();
   const { theme, toggleTheme } = useTheme();
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ name: "", slug: "", description: "" });
+  const [limitsWorkspace, setLimitsWorkspace] = useState<Workspace | null>(null);
+  const [editWorkspace, setEditWorkspace] = useState<Workspace | null>(null);
+  const [editForm, setEditForm] = useState({ name: "", slug: "", description: "", isCommsWorkspace: false });
+  const [form, setForm] = useState({ name: "", slug: "", description: "", isCommsWorkspace: false });
+  const { user } = useAuth();
+  const isGlobalAdmin = user?.role === "admin";
 
-  const { data: workspaces, isLoading } = useQuery<Workspace[]>({ queryKey: ["/api/workspaces"] });
+  const { data: workspaces, isLoading } = useQuery<Workspace[]>({
+    queryKey: isGlobalAdmin ? ["/api/workspaces"] : ["/api/auth/my-admin-workspaces"],
+  });
 
   const createMutation = useMutation({
     mutationFn: (data: typeof form) => apiRequest("POST", "/api/workspaces", data),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["/api/workspaces"] });
       setOpen(false);
-      setForm({ name: "", slug: "", description: "" });
+      setForm({ name: "", slug: "", description: "", isCommsWorkspace: false });
       toast({ title: "Workspace created" });
+    },
+    onError: (err: any) => toast({ title: "Error", description: err.message, variant: "destructive" }),
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: (data: typeof editForm) => apiRequest("PUT", `/api/workspaces/${editWorkspace!.id}`, data),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["/api/workspaces"] });
+      setEditWorkspace(null);
+      toast({ title: "Workspace updated" });
     },
     onError: (err: any) => toast({ title: "Error", description: err.message, variant: "destructive" }),
   });
@@ -69,12 +285,16 @@ export default function WorkspacesPage() {
         <div className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-2xl font-bold">Workspaces</h1>
-            <p className="text-muted-foreground mt-1">Isolated environments for each team or use case</p>
+            <p className="text-muted-foreground mt-1">
+              {isGlobalAdmin ? "Isolated environments for each team or use case" : "Workspaces you administer"}
+            </p>
           </div>
-          <Button onClick={() => setOpen(true)} data-testid="button-create-workspace">
-            <Plus className="w-4 h-4 mr-2" />
-            New Workspace
-          </Button>
+          {isGlobalAdmin && (
+            <Button onClick={() => setOpen(true)} data-testid="button-create-workspace">
+              <Plus className="w-4 h-4 mr-2" />
+              New Workspace
+            </Button>
+          )}
         </div>
 
         {isLoading ? (
@@ -85,10 +305,14 @@ export default function WorkspacesPage() {
           <div className="text-center py-24">
             <Network className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
             <h3 className="text-lg font-semibold mb-2">No workspaces yet</h3>
-            <p className="text-muted-foreground mb-6">Create your first workspace to get started</p>
-            <Button onClick={() => setOpen(true)}>
-              <Plus className="w-4 h-4 mr-2" /> Create Workspace
-            </Button>
+            <p className="text-muted-foreground mb-6">
+              {isGlobalAdmin ? "Create your first workspace to get started" : "You have not been assigned as workspace admin to any workspace yet."}
+            </p>
+            {isGlobalAdmin && (
+              <Button onClick={() => setOpen(true)}>
+                <Plus className="w-4 h-4 mr-2" /> Create Workspace
+              </Button>
+            )}
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -99,16 +323,45 @@ export default function WorkspacesPage() {
                     <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center mb-2">
                       <Network className="w-5 h-5 text-primary" />
                     </div>
-                    <Button
-                      variant="ghost" size="icon"
-                      className="opacity-0 group-hover:opacity-100 h-8 w-8 text-muted-foreground hover:text-destructive"
-                      onClick={(e) => { e.preventDefault(); deleteMutation.mutate(ws.id); }}
-                      data-testid={`button-delete-workspace-${ws.id}`}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </Button>
+                    {isGlobalAdmin && (
+                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <Button
+                          variant="ghost" size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                          onClick={(e) => { e.preventDefault(); setEditForm({ name: ws.name, slug: ws.slug, description: ws.description ?? "", isCommsWorkspace: ws.isCommsWorkspace ?? false }); setEditWorkspace(ws); }}
+                          title="Edit workspace"
+                          data-testid={`button-edit-workspace-${ws.id}`}
+                        >
+                          <Pencil className="w-4 h-4" />
+                        </Button>
+                        <Button
+                          variant="ghost" size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                          onClick={(e) => { e.preventDefault(); setLimitsWorkspace(ws); }}
+                          title="Configure limits"
+                          data-testid={`button-configure-limits-${ws.id}`}
+                        >
+                          <Settings2 className="w-4 h-4" />
+                        </Button>
+                        <Button
+                          variant="ghost" size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                          onClick={(e) => { e.preventDefault(); deleteMutation.mutate(ws.id); }}
+                          data-testid={`button-delete-workspace-${ws.id}`}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </div>
+                    )}
                   </div>
-                  <CardTitle className="text-base">{ws.name}</CardTitle>
+                  <div className="flex items-center gap-2">
+                    <CardTitle className="text-base">{ws.name}</CardTitle>
+                    {ws.isCommsWorkspace && (
+                      <Badge variant="secondary" className="text-xs gap-1 py-0" data-testid={`badge-comms-${ws.id}`}>
+                        <MessageSquare className="w-3 h-3" />Comms
+                      </Badge>
+                    )}
+                  </div>
                   <CardDescription className="text-xs font-mono text-muted-foreground">{ws.slug}</CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -125,6 +378,7 @@ export default function WorkspacesPage() {
         )}
       </main>
 
+      {/* Create workspace dialog */}
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
           <DialogHeader>
@@ -146,6 +400,17 @@ export default function WorkspacesPage() {
               <Textarea id="ws-desc" value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
                 placeholder="Optional description..." className="mt-1" rows={3} data-testid="input-workspace-description" />
             </div>
+            <div className="flex items-center justify-between rounded-lg border border-border p-3">
+              <div>
+                <p className="text-sm font-medium">Comms Workspace</p>
+                <p className="text-xs text-muted-foreground mt-0.5">Enables two-way Slack / Teams inbound channels</p>
+              </div>
+              <Switch
+                checked={form.isCommsWorkspace}
+                onCheckedChange={(v) => setForm((f) => ({ ...f, isCommsWorkspace: v }))}
+                data-testid="switch-is-comms-workspace"
+              />
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
@@ -156,6 +421,55 @@ export default function WorkspacesPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Edit workspace dialog */}
+      <Dialog open={!!editWorkspace} onOpenChange={(o) => { if (!o) setEditWorkspace(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Workspace</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div>
+              <Label htmlFor="edit-ws-name">Name</Label>
+              <Input id="edit-ws-name" value={editForm.name} onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))}
+                placeholder="My Team" className="mt-1" data-testid="input-edit-workspace-name" />
+            </div>
+            <div>
+              <Label htmlFor="edit-ws-slug">Slug</Label>
+              <Input id="edit-ws-slug" value={editForm.slug} onChange={(e) => setEditForm((f) => ({ ...f, slug: e.target.value }))}
+                placeholder="my-team" className="mt-1 font-mono" data-testid="input-edit-workspace-slug" />
+            </div>
+            <div>
+              <Label htmlFor="edit-ws-desc">Description</Label>
+              <Textarea id="edit-ws-desc" value={editForm.description} onChange={(e) => setEditForm((f) => ({ ...f, description: e.target.value }))}
+                placeholder="Optional description..." className="mt-1" rows={3} data-testid="input-edit-workspace-description" />
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-border p-3">
+              <div>
+                <p className="text-sm font-medium">Comms Workspace</p>
+                <p className="text-xs text-muted-foreground mt-0.5">Enables two-way Slack / Teams inbound channels</p>
+              </div>
+              <Switch
+                checked={editForm.isCommsWorkspace}
+                onCheckedChange={(v) => setEditForm((f) => ({ ...f, isCommsWorkspace: v }))}
+                data-testid="switch-edit-is-comms-workspace"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditWorkspace(null)}>Cancel</Button>
+            <Button onClick={() => updateMutation.mutate(editForm)} disabled={updateMutation.isPending || !editForm.name || !editForm.slug}
+              data-testid="button-submit-edit-workspace">
+              {updateMutation.isPending ? "Saving..." : "Save Changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Configure limits dialog */}
+      {limitsWorkspace && (
+        <WorkspaceLimitsModal workspace={limitsWorkspace} onClose={() => setLimitsWorkspace(null)} />
+      )}
     </div>
   );
 }

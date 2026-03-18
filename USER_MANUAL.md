@@ -13,9 +13,12 @@ Welcome to NanoOrch. This guide covers everything you need to know as a chat use
 5. [Types of responses](#5-types-of-responses)
 6. [Approving actions](#6-approving-actions)
 7. [When the agent runs code](#7-when-the-agent-runs-code)
-8. [Knowledge sources (RAGFlow)](#8-knowledge-sources-ragflow)
-9. [Tips for better results](#9-tips-for-better-results)
-10. [Troubleshooting](#10-troubleshooting)
+8. [What agents can do](#8-what-agents-can-do)
+9. [Automated agents (scheduled and pipeline)](#9-automated-agents-scheduled-and-pipeline)
+10. [Knowledge sources (RAGFlow)](#10-knowledge-sources-ragflow)
+11. [Tips for better results](#11-tips-for-better-results)
+12. [Troubleshooting](#12-troubleshooting)
+13. [Using agents via Slack or Teams](#13-using-agents-via-slack-or-teams)
 
 ---
 
@@ -25,7 +28,7 @@ Go to the URL your administrator gave you (e.g. `http://your-company-nanoorch.co
 
 > If you have not received a username and password, contact your administrator.
 
-After logging in you will be taken directly to your workspace list.
+After logging in you will be taken to your workspace list.
 
 ---
 
@@ -49,7 +52,7 @@ The input box is at the bottom of the screen. Type your message there and press 
 
 ## 4. Talking to an agent
 
-Agents are AI assistants set up by your administrator. Each one has a name and a specific area of focus — for example, one agent might handle infrastructure questions, another might search your company knowledge base.
+Agents are AI assistants set up by your administrator. Each one has a name and a specific area of focus — for example, one agent might handle infrastructure questions, another might manage Jira tickets, another might search your company knowledge base.
 
 ### Selecting an agent with @mention
 
@@ -96,29 +99,37 @@ If your question requires a calculation or data processing, the agent writes a s
 → After 10 years at 4.5% annual compound interest, $50,000 grows to $77,931.29.
 ```
 
-You will see the `⚙ running … in sandbox…` indicator while the code is executing. It disappears automatically when the result is ready. This usually takes only a second or two.
+You will see the `⚙ running … in sandbox…` indicator while the code is executing. It disappears automatically when the result is ready.
 
-### Action (requires your approval)
+### Action response
 
-If your request would create, change, or delete something — like creating a cloud resource — the agent pauses and shows you a confirmation card before doing anything. See the next section.
+If your request involves fetching live data or performing an operation — such as listing cloud resources, searching Jira, creating a GitHub issue, or triggering a pipeline — the agent calls the relevant service and returns the real result.
+
+```
+@jira-bot list all open P1 bugs assigned to me
+→ Found 3 open P1 issues assigned to you:
+  • CORE-412 — Login timeout on mobile (High) — Updated 2h ago
+  • CORE-389 — Payment flow 500 error (Highest) — Updated 1d ago
+  • INFRA-77 — DB connection pool exhaustion (High) — Updated 3h ago
+```
 
 ---
 
 ## 6. Approving actions
 
-When the agent detects that your request involves a **write operation** (creating, modifying, or deleting something), it stops and shows you a confirmation card like this:
+When the agent detects that your request involves a **write operation** (creating, modifying, or deleting something in a cloud service or developer tool), it may pause and show you a confirmation card before doing anything:
 
 > **Pending action**
-> Create S3 bucket `my-backup-bucket` in `us-east-1`
+> Create GitHub issue: "Login timeout on mobile" in repo my-org/backend
 >
 > [ Approve ]   [ Cancel ]
 
 - **Approve** — the action runs. You will see a progress indicator and a completion message when it finishes.
 - **Cancel** — nothing happens. You can rephrase or ask something different.
 
-> Review the description carefully before approving. Actions that create or delete cloud resources can have real costs and consequences.
+> Review the description carefully before approving. Actions that create issues, modify resources, or trigger pipelines have real effects.
 
-If you approved by mistake and the action has not started yet, you can cancel immediately. Once it has started, contact your administrator.
+If you are a **workspace admin**, pending approvals also appear in the **Approvals** section of the sidebar with a badge showing how many are waiting. You can review and resolve them there at any time.
 
 ---
 
@@ -140,7 +151,74 @@ The sandbox can run Python and JavaScript. It cannot browse the internet, access
 
 ---
 
-## 8. Knowledge sources (RAGFlow)
+## 8. What agents can do
+
+Depending on which integrations your administrator has set up, agents in your workspace may be able to do the following:
+
+### Cloud infrastructure (AWS, GCP, Azure)
+
+```
+@infra-bot list all running EC2 instances in us-east-1
+@infra-bot how many S3 buckets do we have?
+@infra-bot show me the last 50 error logs from /app/production
+@infra-bot list all virtual machines in the PROD resource group
+```
+
+### Jira
+
+```
+@jira-bot show me all open P1 bugs in project CORE
+@jira-bot create a bug: "Payment timeout on checkout" — priority High
+@jira-bot what is the status of CORE-412?
+@jira-bot add a comment to INFRA-77: "Confirmed — connection pool limit is 100"
+@jira-bot list all active sprints on the engineering board
+```
+
+### GitHub
+
+```
+@devbot list all open PRs in the backend repo
+@devbot show me issues labelled "bug" in my-org/frontend
+@devbot create an issue: "Fix login redirect loop" in my-org/backend
+@devbot what's the status of the last 5 GitHub Actions runs on main?
+```
+
+### GitLab
+
+```
+@devbot list all open merge requests targeting main
+@devbot show me failed pipelines on the release branch
+@devbot trigger a new pipeline on the staging branch
+@devbot create an issue: "Update dependencies" in project 123
+```
+
+### Knowledge base (RAGFlow)
+
+If your administrator has connected a RAGFlow knowledge base, the agent automatically searches it before every response — you do not need to ask it to. See section 10 for details.
+
+> **Which tools are available** depends on what your administrator has configured for your workspace. If an agent says it cannot perform an action, ask your administrator to enable the relevant integration and tools.
+
+---
+
+## 9. Automated agents (scheduled and pipeline)
+
+Your administrator may have set up two types of automated workflows that run without any input from you:
+
+### Scheduled agents
+
+A scheduled agent runs automatically on a timed schedule — for example, every Monday morning an agent might fetch all open P1 Jira issues and send a digest, or every hour an agent might check for CloudWatch errors.
+
+When a scheduled agent completes its task, the result may be automatically sent to a Slack or Teams channel. You may receive these as regular messages in your team channel without having to do anything in NanoOrch.
+
+### Pipelines
+
+A pipeline chains several agents together in sequence — the output of each agent is passed automatically to the next. For example: one agent fetches data, a second agent summarises it, and a third creates a Jira ticket with the summary. Pipelines can also run on a schedule.
+
+You will not normally interact with pipelines directly. If you want an automated multi-step workflow set up, ask your administrator.
+
+---
+
+## 10. Knowledge sources (RAGFlow)
 
 If your administrator has connected a company knowledge base (RAGFlow), the agent will automatically search it before every response — you do not need to ask it to.
 
@@ -159,25 +237,28 @@ Click **Sources** to expand and read the specific document excerpts the agent us
 
 ---
 
-## 9. Tips for better results
+## 11. Tips for better results
 
 **Be specific.** The more context you give, the better the response.
 
 ```
-Less specific:   @infra-bot list instances
-More specific:   @infra-bot list all EC2 instances in us-east-1 that are currently running
+Less specific:   @jira-bot show issues
+More specific:   @jira-bot show all open P1 and P2 bugs in project CORE assigned to the backend team
 ```
 
-**Address the right agent.** Your administrator may have set up specialist agents — one for cloud infrastructure, one for knowledge base search, one for data analysis. Using the right agent gets you a better answer faster.
+**Address the right agent.** Your administrator may have set up specialist agents — one for cloud infrastructure, one for Jira, one for GitHub, one for knowledge base search. Using the right agent gets you a better answer faster.
 
 **Ask follow-up questions.** The agent remembers the context of your current conversation. You can refine or follow up without repeating yourself:
 
 ```
-@agent list my S3 buckets
-→ [lists buckets]
+@jira-bot list my open issues
+→ [lists issues]
 
-@agent which of those were created in the last 30 days?
+@jira-bot which of those are P1?
 → [filters and replies]
+
+@jira-bot add a comment to the first one: "Investigating now"
+→ [adds the comment]
 ```
 
 **For calculations, paste the data inline.** If you have JSON, CSV, or numbers you want the agent to process, paste them directly into your message.
@@ -190,11 +271,11 @@ More specific:   @infra-bot list all EC2 instances in us-east-1 that are current
 
 ---
 
-## 10. Troubleshooting
+## 12. Troubleshooting
 
 **The agent is not responding / the spinner keeps going**
 
-- Wait up to 30 seconds — some responses (especially ones that run code or call cloud APIs) take longer.
+- Wait up to 30 seconds — responses that call Jira, GitHub, GitLab, or cloud APIs take longer than conversational answers.
 - If it has been more than a minute with no response, try refreshing the page and resending your message.
 
 **"No agents available" in the dropdown**
@@ -203,15 +284,23 @@ More specific:   @infra-bot list all EC2 instances in us-east-1 that are current
 
 **The agent says it cannot run code**
 
-- The code sandbox image may not have been built on the server. Ask your administrator to run `docker build -t nanoorch-sandbox:latest ./agent/sandbox` on the host.
+- The code sandbox image may not have been built on the server. Ask your administrator.
 
-**The agent says it does not have access to a cloud tool**
+**The agent says it does not have access to Jira / GitHub / GitLab**
 
-- The tool may not be enabled for that agent. Ask your administrator to enable it in the agent's settings under **Tools**.
+- The integration may not be set up, or the tool may not be enabled for that specific agent. Ask your administrator to add the integration and enable the relevant tools in the agent's settings.
+
+**The agent paused and is waiting for approval**
+
+- The agent has detected a write operation and is waiting for a workspace admin to approve it. If you are a workspace admin, go to the **Approvals** section in the sidebar. Otherwise, let your administrator know there is a pending approval.
+
+**The agent says it cannot find an issue / repo / project**
+
+- Check that you provided the correct project key, repo name, or project ID. The agent uses exactly what you give it — typos in project names will cause "not found" errors.
 
 **The action ran but something went wrong**
 
-- Open the task that was created (your administrator can see it in the **Tasks** view) to check the detailed logs. Share those logs with your administrator.
+- Open the task that was created (your administrator can see it in the **Tasks** view) to check the detailed logs. Share the task ID with your administrator.
 
 **I cannot see a workspace I should have access to**
 
@@ -223,6 +312,49 @@ More specific:   @infra-bot list all EC2 instances in us-east-1 that are current
 
 ---
 
+## 13. Using agents via Slack or Teams
+
+If your administrator has set up a **comms workspace**, you can talk to NanoOrch agents directly from Slack or Microsoft Teams without opening the web app.
+
+### Slack
+
+**Mention the bot** in any channel it has been invited to:
+```
+@NanoOrchBot what is the status of our deployment?
+```
+
+The agent will process your message and **reply in the same thread** — usually within a few seconds.
+
+**To address a specific agent**, prefix your message with `use agent-name:`:
+```
+@NanoOrchBot use devops-agent: check CloudWatch for any errors in the last hour
+```
+
+Without that prefix, your message goes to the default agent configured by your administrator.
+
+**Direct messages** also work — send the bot a DM and it will respond the same way.
+
+### Microsoft Teams
+
+Send a message to the Teams channel where the bot has been added:
+```
+use devops-agent: check CloudWatch for any errors in the last hour
+```
+
+Or just type your prompt and the default agent will reply.
+
+### What the agent can do from Slack / Teams
+
+Everything it can do from the web chat — run code, query Jira, search GitHub, call AWS/GCP/Azure tools, retrieve from RAGFlow knowledge bases, and more. If an action requires approval, the agent will tell you; your administrator can approve it from the NanoOrch web UI.
+
+### Limitations
+
+- One message = one task. Long-running tasks may take a minute or two before you see a reply.
+- Context is shared within the same Slack **thread** or Teams **conversation**. Starting a new thread starts a fresh conversation.
+- The agent cannot send attachments back to Slack/Teams — only text replies.
+
+---
+
 ## Quick reference
 
 | Goal | How |
@@ -230,7 +362,12 @@ More specific:   @infra-bot list all EC2 instances in us-east-1 that are current
 | Talk to an agent | Type `@agent-name your message` and press Enter |
 | Pick an agent from the list | Type `@`, use ↑↓ arrows, press Enter or Tab |
 | Cancel agent selection | Press Escape |
-| Approve a pending action | Click **Approve** on the confirmation card |
+| Approve a pending action | Click **Approve** on the confirmation card (or via Approvals in sidebar if workspace admin) |
 | See document sources | Click **Sources** below the agent's reply |
 | Ask a follow-up | Just keep typing — context is remembered |
+| Search Jira | `@agent search Jira for [your query]` |
+| Create a GitHub issue | `@agent create a GitHub issue: [title]` |
+| Trigger a GitLab pipeline | `@agent trigger pipeline on [branch]` |
 | Switch workspace | Go back to the home screen (top-left logo or `/member`) |
+| Chat via Slack | Mention the bot: `@NanoOrchBot your question` |
+| Route to a specific agent via Slack/Teams | `use agent-name: your prompt` |

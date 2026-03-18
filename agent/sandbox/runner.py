@@ -9,20 +9,41 @@ language = os.environ.get("LANGUAGE", "python").lower()
 code_b64 = os.environ.get("CODE_B64", "")
 timeout_seconds = int(os.environ.get("TIMEOUT_SECONDS", "25"))
 
+SUPPORTED = "python, javascript, bash, ruby, r, go, java"
+
 try:
     code = base64.b64decode(code_b64).decode("utf-8")
 except Exception as e:
     print(json.dumps({"stdout": "", "stderr": f"Failed to decode code: {e}", "exitCode": 1}))
     sys.exit(0)
 
-if language == "python":
+if language in ("python", "python3"):
     suffix = ".py"
     cmd_prefix = ["python"]
-elif language == "javascript":
+elif language in ("javascript", "js", "node", "typescript", "ts"):
     suffix = ".js"
     cmd_prefix = ["node"]
+elif language in ("bash", "sh", "shell"):
+    suffix = ".sh"
+    cmd_prefix = ["bash"]
+elif language == "ruby":
+    suffix = ".rb"
+    cmd_prefix = ["ruby"]
+elif language in ("r", "rscript"):
+    suffix = ".R"
+    cmd_prefix = ["Rscript"]
+elif language == "go":
+    suffix = ".go"
+    cmd_prefix = ["go", "run"]
+elif language == "java":
+    suffix = ".java"
+    cmd_prefix = ["java", "--source", "21"]
 else:
-    print(json.dumps({"stdout": "", "stderr": f"Unsupported language: {language}. Supported: python, javascript", "exitCode": 1}))
+    print(json.dumps({
+        "stdout": "",
+        "stderr": f"Unsupported language: {language}. Supported: {SUPPORTED}",
+        "exitCode": 1,
+    }))
     sys.exit(0)
 
 try:

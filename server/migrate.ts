@@ -1,6 +1,9 @@
 import { pool } from "./db";
+import { readdir, readFile } from "fs/promises";
+import { existsSync } from "fs";
+import path from "path";
 
-const MIGRATIONS: Array<{ name: string; sql: string }> = [
+const INCREMENTAL_MIGRATIONS: Array<{ name: string; sql: string }> = [
   {
     name: "add_ollama_provider_enum",
     sql: `ALTER TYPE "provider" ADD VALUE IF NOT EXISTS 'ollama'`,
@@ -17,7 +20,238 @@ const MIGRATIONS: Array<{ name: string; sql: string }> = [
     name: "add_integration_mode",
     sql: `ALTER TABLE "cloud_integrations" ADD COLUMN IF NOT EXISTS "integration_mode" text DEFAULT 'tool' NOT NULL`,
   },
+  {
+    name: "add_cloud_provider_jira",
+    sql: `ALTER TYPE "cloud_provider" ADD VALUE IF NOT EXISTS 'jira'`,
+  },
+  {
+    name: "add_cloud_provider_github",
+    sql: `ALTER TYPE "cloud_provider" ADD VALUE IF NOT EXISTS 'github'`,
+  },
+  {
+    name: "add_cloud_provider_gitlab",
+    sql: `ALTER TYPE "cloud_provider" ADD VALUE IF NOT EXISTS 'gitlab'`,
+  },
+  {
+    name: "add_cloud_provider_teams",
+    sql: `ALTER TYPE "cloud_provider" ADD VALUE IF NOT EXISTS 'teams'`,
+  },
+  {
+    name: "add_channel_type_slack",
+    sql: `ALTER TYPE "channel_type" ADD VALUE IF NOT EXISTS 'slack'`,
+  },
+  {
+    name: "add_channel_type_teams",
+    sql: `ALTER TYPE "channel_type" ADD VALUE IF NOT EXISTS 'teams'`,
+  },
+  {
+    name: "add_channel_type_google_chat",
+    sql: `ALTER TYPE "channel_type" ADD VALUE IF NOT EXISTS 'google_chat'`,
+  },
+  {
+    name: "add_channel_type_generic_webhook",
+    sql: `ALTER TYPE "channel_type" ADD VALUE IF NOT EXISTS 'generic_webhook'`,
+  },
+  {
+    name: "create_channel_deliveries",
+    sql: `CREATE TABLE IF NOT EXISTS "channel_deliveries" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "channel_id" varchar NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      "event" text NOT NULL,
+      "status_code" integer,
+      "response_body" text,
+      "error" text,
+      "sent_at" timestamp DEFAULT now()
+    )`,
+  },
+  {
+    name: "add_tasks_parent_task_id",
+    sql: `ALTER TABLE "tasks" ADD COLUMN IF NOT EXISTS "parent_task_id" varchar`,
+  },
+  {
+    name: "create_scheduled_jobs",
+    sql: `CREATE TABLE IF NOT EXISTS "scheduled_jobs" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "workspace_id" varchar NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      "orchestrator_id" varchar NOT NULL REFERENCES orchestrators(id) ON DELETE CASCADE,
+      "agent_id" varchar NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      "name" text NOT NULL,
+      "prompt" text NOT NULL,
+      "cron_expression" varchar NOT NULL,
+      "timezone" varchar DEFAULT 'UTC',
+      "is_active" boolean DEFAULT true,
+      "last_run_at" timestamp,
+      "next_run_at" timestamp,
+      "last_task_id" varchar,
+      "created_at" timestamp DEFAULT now()
+    )`,
+  },
+  {
+    name: "create_approval_requests",
+    sql: `CREATE TABLE IF NOT EXISTS "approval_requests" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "workspace_id" varchar NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      "task_id" varchar REFERENCES tasks(id) ON DELETE SET NULL,
+      "agent_id" varchar REFERENCES agents(id) ON DELETE SET NULL,
+      "agent_name" text,
+      "message" text NOT NULL,
+      "action" text NOT NULL,
+      "impact" text,
+      "status" text NOT NULL DEFAULT 'pending',
+      "resolved_by" varchar,
+      "resolution" text,
+      "resolved_at" timestamp,
+      "created_at" timestamp DEFAULT now()
+    )`,
+  },
+  {
+    name: "create_pipelines",
+    sql: `CREATE TABLE IF NOT EXISTS "pipelines" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "workspace_id" varchar NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      "orchestrator_id" varchar NOT NULL REFERENCES orchestrators(id) ON DELETE CASCADE,
+      "name" text NOT NULL,
+      "description" text,
+      "is_active" boolean DEFAULT true,
+      "cron_expression" varchar,
+      "timezone" varchar DEFAULT 'UTC',
+      "last_run_at" timestamp,
+      "next_run_at" timestamp,
+      "created_at" timestamp DEFAULT now()
+    )`,
+  },
+  {
+    name: "create_pipeline_steps",
+    sql: `CREATE TABLE IF NOT EXISTS "pipeline_steps" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "pipeline_id" varchar NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+      "agent_id" varchar NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      "name" text NOT NULL,
+      "prompt_template" text NOT NULL,
+      "step_order" integer NOT NULL,
+      "created_at" timestamp DEFAULT now()
+    )`,
+  },
+  {
+    name: "create_pipeline_runs",
+    sql: `CREATE TABLE IF NOT EXISTS "pipeline_runs" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "pipeline_id" varchar NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+      "status" text NOT NULL DEFAULT 'pending',
+      "triggered_by" text DEFAULT 'manual',
+      "started_at" timestamp,
+      "completed_at" timestamp,
+      "error" text,
+      "created_at" timestamp DEFAULT now()
+    )`,
+  },
+  {
+    name: "create_pipeline_step_runs",
+    sql: `CREATE TABLE IF NOT EXISTS "pipeline_step_runs" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "run_id" varchar NOT NULL REFERENCES pipeline_runs(id) ON DELETE CASCADE,
+      "step_id" varchar NOT NULL REFERENCES pipeline_steps(id) ON DELETE CASCADE,
+      "task_id" varchar REFERENCES tasks(id) ON DELETE SET NULL,
+      "status" text NOT NULL DEFAULT 'pending',
+      "output" text,
+      "started_at" timestamp,
+      "completed_at" timestamp,
+      "error" text
+    )`,
+  },
+  {
+    name: "create_token_usage",
+    sql: `CREATE TABLE IF NOT EXISTS "token_usage" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "workspace_id" varchar NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      "task_id" varchar REFERENCES tasks(id) ON DELETE SET NULL,
+      "agent_id" varchar REFERENCES agents(id) ON DELETE SET NULL,
+      "agent_name" text,
+      "provider" text NOT NULL,
+      "model" text NOT NULL,
+      "input_tokens" integer NOT NULL DEFAULT 0,
+      "output_tokens" integer NOT NULL DEFAULT 0,
+      "estimated_cost_usd" real DEFAULT 0,
+      "created_at" timestamp DEFAULT now()
+    )`,
+  },
+  {
+    name: "create_user_sessions",
+    sql: `CREATE TABLE IF NOT EXISTS "user_sessions" (
+      "sid" varchar NOT NULL,
+      "sess" json NOT NULL,
+      "expire" timestamp(6) NOT NULL,
+      CONSTRAINT "user_sessions_pkey" PRIMARY KEY ("sid")
+    );
+    CREATE INDEX IF NOT EXISTS "IDX_user_sessions_expire" ON "user_sessions" ("expire")`,
+  },
+  {
+    name: "add_tasks_comms_thread_id",
+    sql: `ALTER TABLE "tasks" ADD COLUMN IF NOT EXISTS "comms_thread_id" varchar`,
+  },
+  {
+    name: "add_workspaces_is_comms_workspace",
+    sql: `ALTER TABLE "workspaces" ADD COLUMN IF NOT EXISTS "is_comms_workspace" boolean DEFAULT false`,
+  },
+  {
+    name: "create_comms_threads",
+    sql: `CREATE TABLE IF NOT EXISTS "comms_threads" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "channel_id" varchar NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      "external_thread_id" text NOT NULL,
+      "external_channel_id" text,
+      "external_user_id" text,
+      "external_user_name" text,
+      "agent_id" varchar REFERENCES agents(id) ON DELETE SET NULL,
+      "platform" text NOT NULL,
+      "conversation_ref" jsonb DEFAULT '{}',
+      "created_at" timestamp DEFAULT now(),
+      "last_activity_at" timestamp DEFAULT now()
+    )`,
+  },
 ];
+
+const IDEMPOTENT_ERROR_CODES = new Set([
+  "42710", // duplicate_object  (type/enum already exists)
+  "42P07", // duplicate_table   (table already exists)
+  "42701", // duplicate_column  (column already exists)
+  "42P16", // invalid_table_definition (e.g. constraint already exists)
+  "23505", // unique_violation  (insert conflict — harmless in seeding)
+  "42704", // undefined_object  (DROP of something that doesn't exist)
+]);
+
+async function applySqlFile(client: any, filePath: string, fileName: string): Promise<void> {
+  const migrationKey = `file:${fileName}`;
+  const { rows } = await client.query(
+    `SELECT name FROM _nanoorch_migrations WHERE name = $1`,
+    [migrationKey],
+  );
+  if (rows.length > 0) return;
+
+  const content = await readFile(filePath, "utf-8");
+  const statements = content
+    .split("-->statement-breakpoint")
+    .map((s: string) => s.trim())
+    .filter((s: string) => s.length > 0);
+
+  for (const stmt of statements) {
+    try {
+      await client.query(stmt);
+    } catch (err: any) {
+      if (IDEMPOTENT_ERROR_CODES.has(err.code)) {
+        console.log(`[db] Skipping already-applied statement in ${fileName} (${err.code}): ${err.message}`);
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  await client.query(
+    `INSERT INTO _nanoorch_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING`,
+    [migrationKey],
+  );
+  console.log(`[db] Applied SQL file: ${fileName}`);
+}
 
 export async function runMigrations(): Promise<void> {
   const client = await pool.connect();
@@ -29,7 +263,19 @@ export async function runMigrations(): Promise<void> {
       )
     `);
 
-    for (const migration of MIGRATIONS) {
+    const migrationsDir = process.env.MIGRATIONS_DIR;
+    if (migrationsDir && existsSync(migrationsDir)) {
+      const files = (await readdir(migrationsDir))
+        .filter((f: string) => f.endsWith(".sql"))
+        .sort();
+
+      for (const file of files) {
+        const filePath = path.join(migrationsDir, file);
+        await applySqlFile(client, filePath, file);
+      }
+    }
+
+    for (const migration of INCREMENTAL_MIGRATIONS) {
       const { rows } = await client.query(
         `SELECT name FROM _nanoorch_migrations WHERE name = $1`,
         [migration.name],

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { apiRequest, queryClient } from "@/lib/queryClient";
+import { apiRequest, queryClient, setCsrfToken } from "@/lib/queryClient";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,8 +22,9 @@ export default function LoginPage() {
       return res.json() as Promise<AuthUser>;
     },
     onSuccess: (user) => {
+      if (user.csrfToken) setCsrfToken(user.csrfToken);
       queryClient.setQueryData(["/api/auth/me"], user);
-      if (user.role === "admin") {
+      if (user.role === "admin" || (user.workspaceAdminIds && user.workspaceAdminIds.length > 0)) {
         navigate("/workspaces");
       } else {
         navigate("/member");

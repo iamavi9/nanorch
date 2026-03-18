@@ -3,6 +3,10 @@ FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     nodejs \
     npm \
+    ruby \
+    r-base \
+    golang \
+    default-jdk \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir numpy pandas requests
 

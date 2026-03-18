@@ -47,6 +47,7 @@ export async function runAnthropic(options: RunAgentOptions): Promise<RunAgentRe
     return {
       content: textContent,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage: { inputTokens: res.usage.input_tokens, outputTokens: res.usage.output_tokens },
     };
   }
 
@@ -66,5 +67,9 @@ export async function runAnthropic(options: RunAgentOptions): Promise<RunAgentRe
       options.onChunk?.(text);
     }
   }
-  return { content: fullResponse };
+  const finalMsg = await stream.finalMessage();
+  return {
+    content: fullResponse,
+    usage: { inputTokens: finalMsg.usage.input_tokens, outputTokens: finalMsg.usage.output_tokens },
+  };
 }

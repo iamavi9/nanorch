@@ -9,7 +9,8 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { UserPlus, Trash2, Users } from "lucide-react";
+import { useAuth } from "@/hooks/useAuth";
+import { UserPlus, Trash2, Users, ShieldCheck, ShieldOff } from "lucide-react";
 
 type WorkspaceMember = {
   memberId: number;
@@ -26,6 +27,8 @@ interface MembersPageProps {
 
 export default function MembersPage({ workspaceId }: MembersPageProps) {
   const { toast } = useToast();
+  const { user } = useAuth();
+  const isGlobalAdmin = user?.role === "admin";
   const [open, setOpen] = useState(false);
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -69,6 +72,21 @@ export default function MembersPage({ workspaceId }: MembersPageProps) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/workspaces", workspaceId, "members"] });
       toast({ title: "Member removed" });
+    },
+  });
+
+  const changeRoleMutation = useMutation({
+    mutationFn: ({ userId, role }: { userId: string; role: "admin" | "member" }) =>
+      apiRequest("PATCH", `/api/workspaces/${workspaceId}/members/${userId}`, { role }),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/workspaces", workspaceId, "members"] });
+      toast({
+        title: variables.role === "admin" ? "Promoted to workspace admin" : "Demoted to member",
+      });
+    },
+    onError: async (err: any) => {
+      const data = await err.response?.json().catch(() => ({}));
+      toast({ title: "Error", description: data?.error || "Failed to change role", variant: "destructive" });
     },
   });
 
@@ -137,7 +155,7 @@ export default function MembersPage({ workspaceId }: MembersPageProps) {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="member">Member — chat only</SelectItem>
-                    <SelectItem value="admin">Admin — full access</SelectItem>
+                    <SelectItem value="admin">Workspace Admin — full workspace access</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -152,7 +170,10 @@ export default function MembersPage({ workspaceId }: MembersPageProps) {
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Workspace Members</CardTitle>
-          <CardDescription>Members can log in and access this workspace's chat interface.</CardDescription>
+          <CardDescription>
+            Members can log in and chat. Workspace admins can fully manage this workspace.
+            {!isGlobalAdmin && " Only top-level admins can create workspaces or manage the platform."}
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {isLoading ? (
@@ -176,9 +197,37 @@ export default function MembersPage({ workspaceId }: MembersPageProps) {
                     <p className="text-xs text-muted-foreground">@{m.username}</p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Badge variant={m.role === "admin" ? "default" : "secondary"} data-testid={`badge-role-${m.userId}`}>
-                      {m.role}
+                    <Badge
+                      variant={m.role === "admin" ? "default" : "secondary"}
+                      data-testid={`badge-role-${m.userId}`}
+                    >
+                      {m.role === "admin" ? "Workspace Admin" : "Member"}
                     </Badge>
+                    {m.role === "member" ? (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-primary"
+                        title="Promote to workspace admin"
+                        data-testid={`button-promote-${m.userId}`}
+                        onClick={() => changeRoleMutation.mutate({ userId: m.userId, role: "admin" })}
+                        disabled={changeRoleMutation.isPending}
+                      >
+                        <ShieldCheck className="h-4 w-4" />
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-orange-500"
+                        title="Demote to member"
+                        data-testid={`button-demote-${m.userId}`}
+                        onClick={() => changeRoleMutation.mutate({ userId: m.userId, role: "member" })}
+                        disabled={changeRoleMutation.isPending}
+                      >
+                        <ShieldOff className="h-4 w-4" />
+                      </Button>
+                    )}
                     <Button
                       variant="ghost"
                       size="icon"

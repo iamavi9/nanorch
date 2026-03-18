@@ -17,9 +17,7 @@ export function isDockerAvailable(): boolean {
   return !!process.env.DOCKER_SOCKET;
 }
 
-interface LoadedCredential extends CloudCredentials {
-  integrationId: string;
-}
+type LoadedCredential = CloudCredentials & { integrationId: string };
 
 export async function executeTaskInDocker(taskId: string): Promise<void> {
   const task = await storage.getTask(taskId);
@@ -352,6 +350,42 @@ async function loadCloudCredentials(
             apiKey: raw.apiKey,
           },
         });
+      } else if (integration.provider === "jira") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "jira",
+          credentials: {
+            baseUrl: raw.baseUrl,
+            email: raw.email,
+            apiToken: raw.apiToken,
+            defaultProjectKey: raw.defaultProjectKey,
+          },
+        });
+      } else if (integration.provider === "github") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "github",
+          credentials: {
+            token: raw.token,
+            defaultOwner: raw.defaultOwner,
+          },
+        });
+      } else if (integration.provider === "gitlab") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "gitlab",
+          credentials: {
+            baseUrl: raw.baseUrl,
+            token: raw.token,
+            defaultProjectId: raw.defaultProjectId,
+          },
+        });
+      } else if (integration.provider === "teams") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "teams",
+          credentials: { webhookUrl: raw.webhookUrl },
+        });
       }
     } catch {
       await log("warn", `Failed to load credentials for integration "${integration.name}" — skipping`);
@@ -382,8 +416,8 @@ function buildSystemPrompt(orchestrator: Orchestrator, agent: Agent | null, hasC
 
   if (hasCloudTools) {
     parts.push(
-      `You have access to cloud tools for AWS, GCP, Azure, and/or RAGFlow. When the user asks about cloud resources, ` +
-      `use the appropriate tool to fetch real data and provide accurate, up-to-date information. ` +
+      `You have access to tools for cloud providers and developer platforms (AWS, GCP, Azure, RAGFlow, Jira, GitHub, GitLab). ` +
+      `When the user asks about resources or operations on any of these platforms, use the appropriate tool to fetch real data. ` +
       `Always summarize tool results in a clear, human-readable format.`
     );
   }

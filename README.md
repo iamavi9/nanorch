@@ -1,23 +1,101 @@
 # NanoOrch — AI Agent Orchestrator Platform
 
-A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, Anthropic, Gemini, and **on-prem Ollama** — with session-based auth, role-based access control, Docker-isolated task execution, real-time monitoring, cloud integrations (AWS/GCP/Azure/RAGFlow), and a chat UI with `@agent` mentions.
+A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, Anthropic, Gemini, and **on-prem Ollama** — with 3-tier role-based access control, per-workspace resource limits, Docker-isolated task execution, real-time monitoring, approval gates, pipeline/DAG chaining, observability dashboards, scheduled jobs, **two-way Slack/Teams messaging** (inbound messages routed to agents, replies posted back to the thread), outbound notifications, cloud integrations (AWS/GCP/Azure), DevTools integrations (Jira/GitHub/GitLab), RAGFlow knowledge base support, and a chat UI with `@agent` mentions.
 
 ---
 
 ## Features
 
-- **Auth & RBAC** — session-based username/password login; `admin` role gets the full dashboard, `member` role gets a clean chat-only interface
+- **Auth & 3-tier RBAC** — session-based login; global admin, workspace admin, and member roles with distinct access levels
 - **Multi-tenant workspaces** — isolated environments per team or project
-- **Member management** — admins create member accounts and assign them to workspaces
+- **Workspace resource limits** — global admins can cap how many orchestrators, agents, channels, and scheduled jobs each workspace may create, and restrict which AI providers and integration types are allowed
+- **Member management** — admins create user accounts and assign them to workspaces with a role (admin or member)
 - **Multiple orchestrators** — each workspace can have multiple orchestrators with its own AI provider, model, and system prompt
 - **Agent management** — create agents per orchestrator with individual instructions, temperature, memory, and tool access
-- **Task queue** — submit tasks via UI, webhook endpoint, or API key channel; real-time SSE log streaming
+- **Task queue** — submit tasks via UI, webhook endpoint, API key channel, or scheduled job; real-time SSE log streaming
+- **Approval gates** — agents pause mid-task and require human sign-off before executing high-impact write operations; pending approvals appear in a dedicated sidebar section with live badge counts
+- **Pipeline / DAG chaining** — sequential multi-step pipelines where each step's output is passed as context to the next agent; supports cron scheduling and manual triggers with per-run step history
+- **Observability** — token usage and cost dashboard across all 4 providers; daily usage charts, per-agent breakdown, provider/model cost summaries
+- **Scheduled jobs** — cron-based agent automation with timezone support, preset schedules, manual trigger, and enable/disable toggle
+- **Two-way comms** — enable a workspace as a *comms workspace* to add Slack and Microsoft Teams inbound channels; messages mention the bot or send a direct message → the prompt is routed to an agent → the agent's reply is posted back in the same Slack thread or Teams conversation
+- **Outbound notifications** — send task completion/failure alerts to Slack, Teams, Google Chat, or any generic webhook; delivery history per channel
 - **AI provider switcher** — OpenAI, Anthropic, Gemini, and Ollama (on-prem); swap per orchestrator
-- **Docker-isolated execution** — when a user approves a write action (create/modify/delete), it runs inside an ephemeral container; conversational tasks stay in-process
+- **Docker-isolated execution** — action tasks run inside ephemeral containers; conversational tasks stay in-process
 - **Code execution** — agents write and run Python/JavaScript directly from chat inside a gVisor (`runsc`) sandbox container; fully network-isolated, read-only filesystem, memory/CPU capped
-- **Cloud integrations** — AWS, GCP, Azure, and RAGFlow with AES-256-GCM encrypted credentials; two modes: **Tool** (agent calls them explicitly) and **Context** (RAGFlow auto-retrieves knowledge before every AI response)
+- **Cloud integrations** — AWS, GCP, Azure with AES-256-GCM encrypted credentials and agentic tool calling
+- **DevTools integrations** — Jira (7 tools: search/create/update issues, sprints, comments), GitHub (7 tools: repos, issues, PRs, Actions), GitLab (8 tools: issues, MRs, pipelines, triggers)
+- **RAGFlow integration** — query knowledge bases as a tool, or auto-inject context before every AI response (Context mode)
+- **Intent classification** — LLM-based classifier routes each message to action / code execution / conversational path automatically
 - **Chat UI** — per-workspace chat with `@agent` mention autocomplete (keyboard ↑↓ navigation, Enter/Tab to select) and live streaming responses
 - **Member chat interface** — clean chat page at `/chat/:slug` for end-users (no admin UI visible)
+
+---
+
+## Screenshots
+
+> Screenshots will be added before the first public release. See [`docs/screenshots/README.md`](./docs/screenshots/README.md) for contributor instructions on what to capture and how to name the files.
+
+### Workspaces
+
+![Workspaces list](./docs/screenshots/workspaces.png)
+
+*Multi-tenant workspace list — Comms badge, resource indicators, and per-workspace admin actions (edit, limits, delete) revealed on hover.*
+
+---
+
+### Chat Interface
+
+![Chat UI](./docs/screenshots/chat.png)
+
+*Per-workspace chat with `@agent` mention autocomplete (keyboard navigation), live streaming responses, and inline code execution output.*
+
+---
+
+### Task Queue & Live Logs
+
+![Task queue](./docs/screenshots/tasks.png)
+
+*Task queue with status badges (queued / running / completed / failed), real-time SSE log streaming panel, and token usage per task.*
+
+---
+
+### Approval Gates
+
+![Approval gates](./docs/screenshots/approvals.png)
+
+*Pending approval card — proposed action, impact description, and one-click Approve / Reject controls with reviewer audit trail.*
+
+---
+
+### Pipeline / DAG Chaining
+
+![Pipelines](./docs/screenshots/pipelines.png)
+
+*Pipeline builder with ordered steps, per-step agent and prompt configuration, cron scheduling, and per-run step history.*
+
+---
+
+### Observability Dashboard
+
+![Observability](./docs/screenshots/observability.png)
+
+*Token usage and cost analytics — 30-day daily chart, summary cards (total tokens in/out, estimated cost), per-agent and per-provider breakdown.*
+
+---
+
+### Two-way Comms — Slack & Teams Inbound
+
+![Two-way comms](./docs/screenshots/comms.png)
+
+*Comms workspace — Slack inbound channel with bot token / signing secret fields, Events Endpoint URL with one-click copy, and Two-way Comms status card.*
+
+---
+
+### Cloud & DevTools Integrations
+
+![Integrations](./docs/screenshots/integrations.png)
+
+*Integrations page — Jira, GitHub, GitLab, AWS, RAGFlow cards with AES-256-GCM encrypted credential state, Test button, and integration mode selector.*
 
 ---
 
@@ -137,7 +215,7 @@ echo "ENCRYPTION_KEY=$(openssl rand -hex 32)" >> .env
 
 ### 5. Build the agent images
 
-**Action task agent** — used for isolated cloud action tasks:
+**Action task agent** — used for isolated cloud/DevTools action tasks:
 ```bash
 docker build -t nanoorch-agent:latest ./agent
 ```
@@ -165,8 +243,8 @@ docker compose logs -f app
 
 Look for:
 ```
-[NanoOrch] Running database migrations...
-[NanoOrch] Starting server...
+[db] Database migrations applied
+[express] serving on port 3000
 ```
 
 ---
@@ -236,40 +314,71 @@ Migrations run automatically on restart.
 
 ## Auth & Access Control
 
-### Roles
+### 3-tier role model
 
-| Role | Access |
-|------|--------|
-| `admin` | Full dashboard — workspaces, orchestrators, agents, tasks, cloud integrations, members |
-| `member` | Chat-only — list of assigned workspaces and `/chat/:slug` per workspace |
+NanoOrch uses three levels of access:
 
-### Default admin
+| Role | Who | Access |
+|------|-----|--------|
+| **Global admin** | Set via `ADMIN_USERNAME`/`ADMIN_PASSWORD` or by assigning `admin` role to a user | Full platform access: all workspaces, create/delete workspaces, configure workspace limits, manage all members |
+| **Workspace admin** | Workspace member with `admin` role in that workspace | Full access within their assigned workspace(s): orchestrators, agents, tasks, integrations, channels, scheduled jobs, pipelines, approvals, members |
+| **Member** | Workspace member with `member` role | Chat-only access at `/chat/:slug` — can talk to agents but cannot see admin UI |
+
+### Default global admin
 
 On first boot, if no admin exists, one is created from `ADMIN_USERNAME` / `ADMIN_PASSWORD` in your `.env`. This only runs once — changing the env var later won't change an existing account.
 
-### Adding members
+### Adding members and workspace admins
 
-1. Log in as admin → open a workspace → **Members** in sidebar
-2. Click **Add Member** — set username, display name, password, role
-3. Member logs in at `/login` and sees their assigned workspaces
+1. Log in as a global admin → open a workspace → **Members** in sidebar
+2. Click **Add Member** — set username, display name, password, and role:
+   - `admin` — becomes a workspace admin for that workspace (can manage orchestrators, agents, etc. within it)
+   - `member` — gets chat-only access
+3. The user logs in at `/login` and is routed based on their role:
+   - Global admins → `/workspaces`
+   - Workspace admins → `/workspaces` (scoped to their assigned workspaces)
+   - Members → `/member` (chat-only workspace list)
+
+### Workspace resource limits
+
+Global admins can restrict how much each workspace can use. On the **Workspaces** page, hover over a workspace card and click the ⚙ gear icon to open the **Workspace Limits** dialog.
+
+**Resource Quotas tab** — set optional upper bounds (leave blank for unlimited):
+
+| Field | What it caps |
+|-------|-------------|
+| Max orchestrators | Number of orchestrators in the workspace |
+| Max agents | Total agents across all orchestrators |
+| Max channels | Total channels across all orchestrators |
+| Max scheduled jobs | Number of scheduled jobs in the workspace |
+
+**Allowed Providers tab** — optionally restrict which providers can be used:
+
+| Group | What it restricts |
+|-------|------------------|
+| AI Providers | Which of openai / anthropic / gemini / ollama can be selected when creating an orchestrator |
+| Cloud Integrations | Which of aws / gcp / azure / jira / github / gitlab / ragflow / teams can be added as integrations |
+| Channel Types | Which outbound channel types (slack / teams / google_chat / generic_webhook) can be created |
+
+When a limit is hit the API returns `409 Quota exceeded`; when a disallowed provider is used it returns `403 Forbidden`.
 
 ---
 
 ## How Docker task isolation works
 
-When a user sends a message like `@agent create an S3 bucket`, the chat flow:
+When a user sends a message like `@agent list my Jira issues`, the flow:
 
-1. Intent is classified — detected as `"action"` (a write operation)
-2. A confirmation card is shown — the user must approve
-3. On approval, a task is created with `intent = "action"`
-4. In Docker Compose (where `DOCKER_SOCKET` is set), the task executor spawns:
+1. Intent is classified — detected as `"action"` (an external system operation)
+2. A task is created in the queue
+3. In Docker Compose (where `DOCKER_SOCKET` is set), the task executor spawns:
    ```
    docker run --rm --memory 512m --cpus 0.5 nanoorch-agent:latest
    ```
-5. The container runs **one round** of AI inference — if the AI requests cloud tool calls, the container returns them to the server, the server executes the cloud tools in-process (credentials never enter the container), then spawns the next container round with updated context
-6. The container exits and is removed automatically after each round
+4. The container runs AI inference with the tool definitions. If the AI calls a tool (e.g. `jira_search_issues`), the server executes it in-process (credentials never enter the container), then feeds the result back to the next inference round
+5. The container exits and is removed automatically
+6. On completion, any outbound channels subscribed to `task.completed` are notified
 
-Conversational messages (`@agent explain what S3 is`) run in-process with no container overhead.
+Conversational messages run in-process with no container overhead.
 
 ---
 
@@ -285,20 +394,28 @@ Conversational messages (`@agent explain what S3 is`) run in-process with no con
 ┌────────────────────────▼─────────────────────────────────────────┐
 │  Express Server (:3000)                                          │
 │                                                                  │
-│  Session Auth        REST API          Task Engine               │
-│  (requireAuth /      /api/auth/*       Queue Worker              │
-│   requireAdmin)      /api/workspaces/* runAgent()                │
-│                      /api/members/*    Tool Calling Loop         │
-│                                        SSE Stream                │
+│  3-tier Auth         REST API          Task Engine               │
+│  requireAuth /       /api/auth/*       Queue Worker              │
+│  requireAdmin /      /api/workspaces/* runAgent()                │
+│  requireWorkspace    /api/members/*    Tool Calling Loop         │
+│  Admin               /api/integrations Scheduler (node-cron)     │
+│                      /api/channels/*   Notifier (outbound)       │
+│                      /api/pipelines/*  Approval Gates            │
+│                      /api/approvals/*  SSE Stream                │
 └───────┬─────────────────────┬────────────────────┬──────────────┘
         │                     │                    │
         ▼                     ▼                    ▼
-  PostgreSQL          AI Providers          Cloud / RAG APIs
+  PostgreSQL          AI Providers          Integrations
   (Drizzle ORM)       OpenAI                AWS / GCP / Azure
-  users               Anthropic             RAGFlow
-  workspaces          Gemini
-  tasks               Ollama (on-prem)
-  cloud_integrations
+  users               Anthropic             Jira / GitHub / GitLab
+  workspaces          Gemini                RAGFlow / Teams
+  workspace_config    Ollama (on-prem)
+  tasks                                     Outbound Channels
+  integrations                              Slack / Teams
+  scheduled_jobs                            Google Chat / Webhook
+  pipelines / runs
+  approval_requests
+  channel_deliveries
         │
         ▼
   Docker Socket (/var/run/docker.sock)
@@ -307,7 +424,7 @@ Conversational messages (`@agent explain what S3 is`) run in-process with no con
   docker run --rm nanoorch-agent:latest
   Ephemeral container per AI inference round
   AI keys injected via env vars
-  Cloud credentials stay on server
+  Integration credentials stay on server
 ```
 
 ---
@@ -321,7 +438,7 @@ Conversational messages (`@agent explain what S3 is`) run in-process with no con
 | `POSTGRES_PASSWORD` | Yes | — | PostgreSQL password |
 | `ADMIN_USERNAME` | No | `admin` | First admin account username |
 | `ADMIN_PASSWORD` | Yes | — | First admin account password |
-| `ENCRYPTION_KEY` | Recommended | derived | 32-byte hex; AES-256-GCM key for cloud credentials |
+| `ENCRYPTION_KEY` | Recommended | derived | 32-byte hex; AES-256-GCM key for credentials |
 | `AI_INTEGRATIONS_OPENAI_API_KEY` | One required* | — | OpenAI API key |
 | `AI_INTEGRATIONS_ANTHROPIC_API_KEY` | One required* | — | Anthropic API key |
 | `AI_INTEGRATIONS_GEMINI_API_KEY` | One required* | — | Gemini API key |
@@ -368,7 +485,7 @@ Make sure port 11434 is open in the security group between the two instances.
 
 ### Tool calling support
 
-Tool calling (RAGFlow queries, cloud operations) only works with models that support it. Confirmed working:
+Tool calling (Jira, GitHub, GitLab, cloud operations) only works with models that support it. Confirmed working:
 - `llama3.1`, `llama3.2`
 - `qwen2.5`, `qwen2.5-coder`
 - `mistral-nemo`
@@ -399,30 +516,12 @@ Agents can write and run Python or JavaScript **directly from the chat** without
 4. The container runs the code and returns `stdout`, `stderr`, and exit code as JSON
 5. The agent reads the output and replies to you with the result
 
-### What the agent can run
-
-| Language | Capabilities |
-|---|---|
-| **Python 3.12** | Full standard library, `math`, `json`, `datetime`, `re`, `itertools`, etc. |
-| **Node.js 20** | Full built-in modules (`fs` excluded at runtime), `crypto`, `util`, etc. |
-
-Neither runtime has internet access or the ability to write files that persist outside the container.
-
 ### Build the sandbox image
 
 On your EC2 host (once, after cloning the repo):
 
 ```bash
 docker build -t nanoorch-sandbox:latest ./agent/sandbox
-```
-
-Verify it works:
-```bash
-docker run --rm --runtime=runsc \
-  -e CODE_B64=$(echo 'print(2 ** 32)' | base64 -w0) \
-  -e LANGUAGE=python \
-  nanoorch-sandbox:latest
-# Expected output: {"stdout":"4294967296\n","stderr":"","exit_code":0}
 ```
 
 ### Environment variables
@@ -434,71 +533,244 @@ docker run --rm --runtime=runsc \
 
 Set `SANDBOX_RUNTIME=runc` if gVisor is not installed. Code execution still works — you just lose the extra kernel-level isolation.
 
-### Example prompts that trigger code execution
-
-```
-@agent calculate the compound interest on $10,000 at 5% over 20 years
-@agent parse this JSON and count how many items have status "active": [...]
-@agent generate a Fibonacci sequence up to 1000
-@agent what is the SHA-256 hash of "hello world"?
-@agent convert 98.6°F to Celsius
-```
-
-The chat UI shows a pulsing indicator while the sandbox is running:
-```
-⚙ running python in sandbox…
-```
-It clears automatically when the result arrives.
-
-### Security considerations
-
-- The sandbox has **zero network access** — it cannot exfiltrate data or make external calls
-- The read-only filesystem prevents persistent writes
-- gVisor intercepts all Linux syscalls before they reach the host kernel — even if the code exploits a container escape, it still hits gVisor's userspace kernel
-- Memory and PID limits prevent resource exhaustion
-- Each run is in a fresh container — no state carries over between requests
-
 ---
 
-## Cloud Integrations
+## Integrations
 
-Add per-workspace cloud credentials so agents can perform real operations. All credentials are **AES-256-GCM encrypted** at rest. Navigate to **Integrations** in the sidebar.
+Add per-workspace integrations so agents can perform real operations. All credentials are **AES-256-GCM encrypted** at rest. Navigate to **Integrations** in the sidebar.
 
 ### Integration Modes
 
-Each integration has a **mode** that controls how the agent uses it:
-
 | Mode | Behaviour |
 |------|-----------|
-| **Tool** | The agent explicitly calls this integration as a tool during action tasks (AWS, GCP, Azure default to this) |
-| **Context** | Knowledge is automatically retrieved and injected into the system prompt before every AI response — no explicit tool call needed (RAGFlow defaults to this) |
+| **Tool** | The agent explicitly calls this integration as a tool during action tasks |
+| **Context** | Knowledge is automatically retrieved and injected before every AI response (RAGFlow only) |
 
-- Tool-mode integrations appear in the **Tool Integrations** section and trigger the action confirmation flow when the agent decides to use them.
-- Context-mode integrations appear in the **Context Integrations** section; for RAGFlow this means every chat response automatically gets relevant document chunks prepended, with cited sources shown in a collapsible panel.
+### Cloud Providers
 
-You can change the mode of any integration at any time from the **Edit** dialog — without touching credentials.
+| Provider | Credentials | Tools |
+|----------|-------------|-------|
+| **AWS** | Access Key ID + Secret + Region | `aws_list_s3_buckets`, `aws_list_s3_objects`, `aws_list_ec2_instances`, `aws_list_lambda_functions`, `aws_get_cloudwatch_logs` |
+| **GCP** | Service Account JSON | `gcp_list_storage_buckets`, `gcp_list_compute_instances`, `gcp_list_cloud_functions` |
+| **Azure** | Client ID + Secret + Tenant ID + Subscription ID | `azure_list_resource_groups`, `azure_list_virtual_machines`, `azure_list_storage_accounts` |
 
-### Editing an integration
+### DevTools
 
-Click the **Edit** (pencil) button on any integration card to:
-- Rename the integration
-- Switch its mode (Tool ↔ Context)
-- Optionally rotate credentials — leave credential fields blank to keep the existing encrypted values
+| Provider | Credentials | Tools |
+|----------|-------------|-------|
+| **Jira** | Base URL + Email + API Token | `jira_list_projects`, `jira_search_issues` (JQL), `jira_get_issue`, `jira_create_issue`, `jira_update_issue`, `jira_add_comment`, `jira_list_sprints` |
+| **GitHub** | Personal Access Token | `github_list_repos`, `github_list_issues`, `github_get_issue`, `github_create_issue`, `github_list_pull_requests`, `github_create_pull_request`, `github_list_workflow_runs` |
+| **GitLab** | Base URL + Token | `gitlab_list_projects`, `gitlab_list_issues`, `gitlab_get_issue`, `gitlab_create_issue`, `gitlab_list_merge_requests`, `gitlab_create_merge_request`, `gitlab_list_pipelines`, `gitlab_trigger_pipeline` |
 
-### Providers and tools
+### Knowledge Base
 
-| Provider | Credentials | Default mode | Agent tools |
-|----------|-------------|--------------|-------------|
-| **AWS** | Access Key ID + Secret + Region | Tool | `aws_list_s3_buckets`, `aws_list_s3_objects`, `aws_list_ec2_instances`, `aws_list_lambda_functions`, `aws_get_cloudwatch_logs` |
-| **GCP** | Service Account JSON | Tool | `gcp_list_storage_buckets`, `gcp_list_compute_instances`, `gcp_list_cloud_functions` |
-| **Azure** | Client ID + Secret + Tenant ID + Subscription ID | Tool | `azure_list_resource_groups`, `azure_list_virtual_machines`, `azure_list_storage_accounts` |
-| **RAGFlow** | Base URL + API Key | Context | `ragflow_list_datasets`, `ragflow_query_dataset`, `ragflow_query_multiple_datasets` |
+| Provider | Credentials | Tools / Behaviour |
+|----------|-------------|-------|
+| **RAGFlow** | Base URL + API Key | `ragflow_list_datasets`, `ragflow_query_dataset`, `ragflow_query_multiple_datasets`; in Context mode, auto-retrieves chunks before every AI response |
+
+### Credential security
+
+- AES-256-GCM encryption at rest — credentials never appear in logs
+- "Test" button on every card validates the connection live without exposing the credentials
+- In Docker Compose: integration credentials stay server-side and never enter the agent container
+
+---
+
+## Approval Gates
+
+When an agent is about to perform a high-impact write operation it can be configured to pause and request human approval before proceeding.
+
+### How it works
+
+1. The agent calls the `request_approval` tool mid-task — the task pauses immediately
+2. A pending approval appears in the **Approvals** section (sidebar badge shows count)
+3. An admin or workspace admin reviews the request — they see the agent's proposed action and impact description
+4. **Approve** — the task resumes and the action executes; **Reject** — the task is cancelled
+5. The approval record remains in the history with the reviewer and timestamp
+
+### When to use it
+
+Configure agents with approval gate instructions for any task that:
+- Creates, modifies, or deletes resources in cloud providers (AWS, GCP, Azure)
+- Writes to production Jira/GitHub/GitLab projects
+- Triggers deployment pipelines
+
+---
+
+## Pipeline / DAG Chaining
+
+Pipelines let you chain multiple agents together sequentially, passing the output of each step as context to the next.
+
+### Creating a pipeline
+
+1. Open a workspace → **Pipelines** → **New Pipeline**
+2. Give the pipeline a name and optional description
+3. Add steps in order — each step selects an orchestrator, agent, and the prompt to send
+4. Optionally configure a cron schedule and timezone for automatic execution
+5. Click **Create**
+
+### Running a pipeline
+
+- **Manual run**: click **Run Now** on the pipeline card
+- **Scheduled run**: automatic, based on the configured cron expression
+
+Each run creates a pipeline run record with step-level status (pending → running → completed / failed). Click any run to see the per-step logs and outputs.
+
+---
+
+## Observability
+
+The **Observability** page (workspace sidebar) shows token usage and cost analytics for all tasks run in the workspace.
+
+| Section | What it shows |
+|---------|--------------|
+| Summary cards | Total tokens in/out, total estimated cost (all time and current period) |
+| Daily usage chart | Token consumption over the last 30 days |
+| Per-agent breakdown | Which agents consumed the most tokens |
+| Provider/model summary | Cost breakdown by AI provider and model |
+
+Costs are estimated based on published provider pricing. Ollama is treated as zero-cost (self-hosted).
+
+---
+
+## Scheduled Jobs
+
+Create cron-based jobs that automatically run agent tasks on a schedule — no external scheduler needed.
+
+### Setting up a scheduled job
+
+1. Open a workspace → **Scheduled Jobs** → **New Scheduled Job**
+2. Fill in:
+   - **Name** — human-readable label
+   - **Cron expression** — use presets (Every Hour, Every Day at Midnight, etc.) or write a custom expression
+   - **Timezone** — IANA timezone (e.g. `America/New_York`)
+   - **Orchestrator** — which orchestrator runs the job
+   - **Prompt** — the task content sent to the agent
+3. Click **Create** — the job is registered immediately
+
+### Example use cases
+
+- `0 9 * * 1` (Every Monday at 9am) — *"Search all open P1 Jira issues and send a summary"*
+- `0 * * * *` (Every hour) — *"Check CloudWatch for ERROR-level logs in the last hour"*
+- `0 8 * * *` (Every day at 8am) — *"List all GitHub PRs awaiting review and summarise them"*
+- `*/15 * * * *` (Every 15 minutes) — *"Query the RAGFlow knowledge base for any new updates"*
+
+Combine with outbound notification channels so the results are automatically posted to Slack or Teams.
+
+---
+
+## Outbound Notification Channels
+
+Configure channels to push task results to external services automatically.
+
+### Supported outbound types
+
+| Type | Description |
+|------|-------------|
+| **Slack** | Posts a formatted Block Kit message to a Slack channel via Incoming Webhook |
+| **Teams** | Posts an Adaptive Card to a Teams channel via Incoming Webhook |
+| **Google Chat** | Posts a card message to a Google Chat space via webhook |
+| **Generic Webhook** | POSTs a plain JSON payload to any URL |
+
+### Setting up an outbound channel
+
+1. Open an orchestrator → **Channels** → **New Channel**
+2. Select the outbound type (Slack, Teams, Google Chat, or Generic Webhook)
+3. Paste the webhook URL from your external service
+4. Select which events trigger the notification (`task.completed`, `task.failed`, or both)
+5. Click **Send Test Ping** to verify the webhook is reachable
+6. Click **View Deliveries** to see the full history of sent notifications
+
+### Getting webhook URLs
+
+- **Slack**: Channel settings → Integrations → Incoming Webhooks → Add New Webhook
+- **Teams**: Channel → Connectors → Incoming Webhook → Configure
+- **Google Chat**: Space → Apps & integrations → Webhooks → Add webhook
+
+---
+
+## Two-way Comms — Slack & Teams Inbound
+
+Enable a workspace as a **comms workspace** to allow agents to receive messages from Slack and Microsoft Teams and automatically reply back in the same thread or conversation.
+
+### How it works
+
+```
+Slack / Teams user sends message
+          ↓
+NanoOrch events endpoint (/api/channels/:id/slack/events)
+          ↓
+Signature verified → prompt extracted → agent selected
+          ↓
+Task created → agent runs → output produced
+          ↓
+Reply posted back to Slack thread / Teams conversation
+```
+
+### Setup — Slack inbound
+
+**1. Create a comms workspace**
+In the Workspaces page, click **New Workspace**, toggle **Comms Workspace** on, and save.
+
+**2. Create a Slack inbound channel**
+Open an orchestrator → Channels → New Channel → type **Slack** → toggle **Enable two-way inbound** → fill in:
+- **Bot Token** — from Slack App → OAuth & Permissions → Bot User OAuth Token (`xoxb-...`)
+- **Signing Secret** — from Slack App → Basic Information → Signing Secret
+- **Default Agent ID** — (optional) the agent ID to route messages to; falls back to the first agent
+
+**3. Register the events endpoint with Slack**
+Copy the **Events Endpoint** URL shown on the channel card and paste it in:
+- Slack App → **Event Subscriptions** → Request URL
+- Subscribe to bot events: `app_mention`, `message.im`
+
+**4. Invite the bot to a Slack channel** and mention it — the agent will process the message and reply in the same thread.
+
+### Setup — Teams inbound
+
+**1. Register a Bot Framework app** in the [Azure Portal](https://portal.azure.com):
+- Create an App Registration → note the **Application (client) ID**
+- Create a client secret → note the **value**
+
+**2. Create a Teams inbound channel** in NanoOrch:
+Open an orchestrator → Channels → New Channel → type **Teams** → toggle **Enable two-way inbound** → fill in:
+- **App ID** — Application (client) ID from Azure
+- **App Password** — client secret value
+- **Default Agent ID** — (optional)
+
+**3. Set the messaging endpoint** in Azure Bot resource → Configuration → Messaging endpoint → paste the **Events Endpoint** URL from the channel card (`/api/channels/:id/teams/events`).
+
+**4. Connect the bot to Teams** via the Azure Bot's Channels → Teams.
+
+### Message routing
+
+By default, messages go to the **Default Agent ID**. To route to a specific agent, prefix the message:
+
+```
+use my-agent-name: summarize last week's incidents
+```
+
+---
+
+## Inbound Webhook Automation
+
+Use inbound channels to trigger agents from external systems — for example, automatically creating a Jira issue when a Jira Service Management ticket arrives.
+
+### Example: JSM → Jira auto-creation
+
+1. Create an orchestrator with a Jira integration
+2. Create an agent with `jira_create_issue` enabled and instructions like:
+   > *"When you receive a JSM ticket payload, extract the summary, description, and priority, then call jira_create_issue to create a linked issue in project ENGINEERING. Map JSM priorities: Critical→Highest, High→High, Medium→Medium, Low→Low. Include the original JSM ticket ID in the description."*
+3. Add an inbound **Webhook** channel — copy the generated URL
+4. In JSM Automation: trigger = "Issue created" → action = "Send web request" → paste the NanoOrch URL
+5. Done — every new JSM ticket automatically creates a linked engineering issue
+
+Multiple agents in the same workspace can each target a different Jira project. One Jira integration (one set of credentials) serves all of them.
 
 ---
 
 ## API Overview
 
-### Auth (public)
+### Auth (public — no session required)
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -507,103 +779,60 @@ Click the **Edit** (pencil) button on any integration card to:
 | `GET` | `/api/auth/me` | Get current user (null if unauthenticated) |
 | `GET` | `/api/auth/my-workspaces` | List workspaces the current user belongs to |
 
-### Admin (requires admin session)
+### Requires active session (any authenticated user)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET/POST` | `/api/workspaces` | List / create workspaces |
-| `GET/POST/DELETE` | `/api/workspaces/:id/members` | Manage workspace members |
-| `GET/POST` | `/api/workspaces/:id/orchestrators` | List / create orchestrators |
-| `GET/POST` | `/api/orchestrators/:id/agents` | List / create agents |
+| `GET` | `/api/workspaces` | List all workspaces |
+| `GET` | `/api/workspaces/:id` | Get a workspace |
+| `GET` | `/api/workspaces/:id/orchestrators` | List orchestrators |
+| `GET` | `/api/orchestrators/:id` | Get orchestrator |
+| `GET` | `/api/orchestrators/:id/agents` | List agents |
 | `GET/POST` | `/api/orchestrators/:id/tasks` | List / submit tasks |
+| `GET` | `/api/tasks/:id` | Get task |
+| `GET` | `/api/tasks/:id/logs` | Get task logs |
 | `GET` | `/api/tasks/:id/stream` | SSE stream of task logs |
-| `GET/POST` | `/api/workspaces/:id/integrations` | List / create integrations |
-| `PUT` | `/api/integrations/:id` | Update name, mode, or credentials |
-| `DELETE` | `/api/integrations/:id` | Remove an integration |
-| `POST` | `/api/integrations/:id/test` | Validate cloud credentials |
+| `GET` | `/api/workspaces/:id/conversations` | List conversations |
+| `POST` | `/api/conversations/:id/chat` | Send chat message |
 
-### Public
+### Requires workspace admin or global admin
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/channels/:id/webhook` | External webhook receiver |
+| `GET/POST` | `/api/workspaces/:id/integrations` | List / create integrations |
+| `GET/PUT/DELETE` | `/api/integrations/:id` | Get / update / delete integration |
+| `POST` | `/api/integrations/:id/test` | Validate credentials live |
+| `GET/POST` | `/api/workspaces/:id/scheduled-jobs` | List / create scheduled jobs |
+| `GET/PUT/DELETE` | `/api/scheduled-jobs/:id` | Get / update / delete a scheduled job |
+| `POST` | `/api/scheduled-jobs/:id/run` | Trigger job immediately |
+| `GET` | `/api/workspaces/:id/approvals` | List approvals |
+| `GET` | `/api/workspaces/:id/approvals/pending-count` | Count pending approvals |
+| `POST` | `/api/approvals/:id/resolve` | Approve or reject a pending approval |
+| `GET/POST` | `/api/workspaces/:id/pipelines` | List / create pipelines |
+| `GET/PUT/DELETE` | `/api/pipelines/:id` | Get / update / delete a pipeline |
+| `POST` | `/api/pipelines/:id/run` | Run a pipeline manually |
+| `GET` | `/api/pipelines/:id/runs` | List pipeline run history |
+| `GET` | `/api/workspaces/:id/observability` | Token usage and cost data |
+| `GET` | `/api/workspaces/:id/quota` | Current resource counts vs configured limits |
+| `GET` | `/api/workspaces/:id/config` | Get workspace limits config |
+| `GET/POST` | `/api/workspaces/:id/members` | List / add members |
+| `PATCH/DELETE` | `/api/workspaces/:id/members/:userId` | Update / remove a member |
 
-WebSocket: `ws://host/ws` — live task log events (requires active session cookie).
+### Requires global admin
 
----
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/workspaces` | Create a workspace |
+| `PUT/DELETE` | `/api/workspaces/:id` | Update / delete a workspace |
+| `POST/PUT/DELETE` | `/api/orchestrators/:id` | Create / update / delete orchestrators |
+| `PUT /api/workspaces/:id/config` | | Set workspace resource limits |
+| `GET/POST` | `/api/members` | List all users / create a user |
+| `PUT/DELETE` | `/api/members/:id` | Update / delete a user |
 
-## Local Development
+### Inbound (no auth — rate-limited)
 
-```bash
-npm install
-cp .env.example .env
-# Edit .env: set DATABASE_URL, SESSION_SECRET, and at least one AI provider key
-
-npm run db:push   # sync database schema
-npm run dev       # Express on :5000, Vite HMR on :5173
-```
-
-Default admin (`admin` / `admin`) is created automatically on first start if no admin exists.
-
-In dev mode, tasks execute in-process (no Docker needed). The Docker executor only activates when `DOCKER_SOCKET` is set.
-
-### Running with Docker locally
-
-Use `docker-compose.dev.yml` for local Docker development — it mounts source code and runs the dev server:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up
-```
-
-> **Important:** Do NOT run plain `docker compose up` in the cloned repo without specifying `-f docker-compose.yml` — Docker Compose will never auto-apply `docker-compose.dev.yml` since it is not named `docker-compose.override.yml`. On EC2, always use:
-> ```bash
-> docker compose up -d
-> ```
-
-### Schema changes
-
-Edit `shared/schema.ts`, then:
-
-```bash
-npm run db:push
-```
-
-### Rebrand
-
-Edit `client/src/lib/config.ts`:
-
-```ts
-export const APP_NAME = "NanoOrch";
-export const APP_TAGLINE = "Agent Platform";
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/channels/:id/webhook` | Submit a task from an external system |
 
 ---
-
-## Adding New Cloud Tools
-
-Two files control the cloud tool system:
-
-| File | Role |
-|------|------|
-| `server/cloud/tools.ts` | Declares the tool schema — name, description, parameters |
-| `server/cloud/executor.ts` | Implements the actual SDK/HTTP call for each tool |
-
-Tool naming: `{provider}_{verb}_{resource}` — e.g. `aws_create_eks_cluster`, `ragflow_query_dataset`.
-
-Append to the provider array in `tools.ts`, add the `if (name === "...")` branch in `executor.ts`. That's it.
-
----
-
-## Security Notes
-
-- Passwords hashed with `crypto.scrypt` — no plaintext storage
-- Cloud credentials AES-256-GCM encrypted before hitting the database
-- Action tasks run in ephemeral containers; cloud credentials never enter the container
-- Set strong `SESSION_SECRET`, `ADMIN_PASSWORD`, and `POSTGRES_PASSWORD` before production
-- Use least-privilege IAM roles for cloud integrations
-
----
-
-## License
-
-MIT

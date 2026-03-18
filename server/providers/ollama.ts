@@ -41,11 +41,10 @@ export async function runOllama(options: RunAgentOptions): Promise<RunAgentResul
     });
 
     const choice = res.choices[0];
-    const toolCalls: ToolCall[] = (choice.message.tool_calls ?? []).map((tc) => ({
-      id: tc.id,
-      name: tc.function.name,
-      arguments: JSON.parse(tc.function.arguments || "{}"),
-    }));
+    const toolCalls: ToolCall[] = (choice.message.tool_calls ?? []).map((tc) => {
+      const fn = (tc as unknown as { function: { name: string; arguments: string } }).function;
+      return { id: tc.id, name: fn.name, arguments: JSON.parse(fn.arguments || "{}") };
+    });
 
     return {
       content: choice.message.content ?? "",

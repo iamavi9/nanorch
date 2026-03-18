@@ -1,10 +1,10 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus, Send, Trash2, MessageSquare, Bot, User, Loader2, CheckCircle, XCircle, Terminal, ChevronDown, ChevronUp, AlertCircle, FileText, Code2 } from "lucide-react";
+import { Plus, Send, Trash2, MessageSquare, Bot, User, Loader2, CheckCircle, XCircle, Terminal, ChevronDown, ChevronUp, AlertCircle, FileText, Code2, GitFork, Pencil, Check, X, Zap, ShieldCheck, ShieldAlert, ShieldOff, PlusCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ChatConversation, ChatMessage } from "@shared/schema";
 
@@ -16,6 +16,14 @@ interface WorkspaceAgent {
   model: string;
 }
 
+type SubtaskState = {
+  id: string;
+  agentId: string;
+  agentName: string;
+  status: "running" | "done" | "error";
+  output: string;
+};
+
 type StreamingMsg = {
   id: string;
   role: "streaming";
@@ -24,11 +32,13 @@ type StreamingMsg = {
   content: string;
   streaming: true;
   codeRunning?: string;
+  subtasks: SubtaskState[];
   conversationId: string;
   mentions: string[];
   messageType: "text";
   metadata: Record<string, unknown>;
   createdAt: Date | null;
+  bypassed?: boolean;
 };
 type DisplayMessage = ChatMessage | StreamingMsg;
 
@@ -46,6 +56,72 @@ const PROVIDER_COLORS: Record<string, string> = {
   anthropic: "bg-orange-500",
   gemini: "bg-blue-500",
 };
+
+function AgentRoster({ agents, onMention }: { agents: WorkspaceAgent[]; onMention: (name: string) => void }) {
+  const groups = useMemo(() => {
+    const map = new Map<string, WorkspaceAgent[]>();
+    for (const a of agents) {
+      const key = a.orchestratorName ?? "Other";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(a);
+    }
+    return Array.from(map.entries());
+  }, [agents]);
+
+  const [open, setOpen] = useState<Set<string>>(() => {
+    const firstKey = groups[0]?.[0] ?? "";
+    return new Set(agents.length <= 8 ? groups.map(([k]) => k) : firstKey ? [firstKey] : []);
+  });
+
+  const toggle = (key: string) => setOpen(prev => {
+    const next = new Set(prev);
+    next.has(key) ? next.delete(key) : next.add(key);
+    return next;
+  });
+
+  return (
+    <div className="space-y-1.5">
+      {groups.map(([orchName, groupAgents]) => (
+        <div key={orchName}>
+          <button
+            className="w-full flex items-center gap-1 text-[10px] text-muted-foreground/55 hover:text-muted-foreground/80 transition-colors py-0.5"
+            onClick={() => toggle(orchName)}
+            data-testid={`agent-group-${orchName}`}
+          >
+            <ChevronDown className={cn(
+              "w-2.5 h-2.5 shrink-0 transition-transform duration-150",
+              open.has(orchName) ? "" : "-rotate-90"
+            )} />
+            <span className="truncate font-semibold uppercase tracking-wider flex-1 text-left">{orchName}</span>
+            <span className="shrink-0 tabular-nums ml-1">{groupAgents.length}</span>
+          </button>
+
+          {open.has(orchName) && (
+            <div className="grid grid-cols-2 gap-1 mt-1 pl-1">
+              {groupAgents.map(agent => (
+                <button
+                  key={agent.id}
+                  className="flex items-center gap-1.5 rounded-md px-1.5 py-1 hover:bg-accent/70 active:bg-accent transition-colors text-left min-w-0"
+                  title={`${agent.name}\n${agent.provider} · ${agent.orchestratorName}`}
+                  onClick={() => onMention(agent.name)}
+                  data-testid={`agent-chip-${agent.id}`}
+                >
+                  <div className={cn(
+                    "w-4 h-4 rounded flex items-center justify-center text-white text-[9px] font-bold shrink-0",
+                    PROVIDER_COLORS[agent.provider] ?? "bg-zinc-500"
+                  )}>
+                    {agent.name[0].toUpperCase()}
+                  </div>
+                  <span className="text-[11px] text-foreground/80 truncate leading-tight">{agent.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function parseMentionNames(text: string): string[] {
   const results: string[] = [];
@@ -80,6 +156,8 @@ export default function ChatPage({ workspaceId }: Props) {
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [confirmStates, setConfirmStates] = useState<Map<string, ConfirmState>>(new Map());
+  const [editingConvId, setEditingConvId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
 
   const { data: conversations = [], isLoading: convsLoading } = useQuery<ChatConversation[]>({
     queryKey: [`/api/workspaces/${workspaceId}/conversations`],
@@ -152,6 +230,27 @@ export default function ChatPage({ workspaceId }: Props) {
     },
   });
 
+  const renameConvMutation = useMutation({
+    mutationFn: ({ id, title }: { id: string; title: string }) =>
+      apiRequest("PATCH", `/api/conversations/${id}`, { title }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: [`/api/workspaces/${workspaceId}/conversations`] });
+      setEditingConvId(null);
+    },
+  });
+
+  const startEditing = (conv: ChatConversation, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditingConvId(conv.id);
+    setEditingTitle(conv.title);
+  };
+
+  const commitRename = (id: string) => {
+    const trimmed = editingTitle.trim();
+    if (trimmed) renameConvMutation.mutate({ id, title: trimmed });
+    else setEditingConvId(null);
+  };
+
   const getActiveMentionQuery = () => {
     const el = textareaRef.current;
     if (!el) return null;
@@ -187,6 +286,12 @@ export default function ChatPage({ workspaceId }: Props) {
     }, 0);
   };
 
+  const quickMention = (agentName: string) => {
+    setInputText(prev => prev ? prev.trimEnd() + ` @${agentName} ` : `@${agentName} `);
+    setMentionQuery(null);
+    setTimeout(() => { textareaRef.current?.focus(); }, 0);
+  };
+
   const filteredAgents = mentionQuery !== null
     ? agents.filter(a => a.name.toLowerCase().includes(mentionQuery.toLowerCase()))
     : [];
@@ -203,13 +308,10 @@ export default function ChatPage({ workspaceId }: Props) {
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     setMentionQuery(null);
     setIsStreaming(true);
+    let currentCoordinatorAgentId: string | null = null;
 
     try {
-      const resp = await fetch(`/api/conversations/${activeConvId}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: text, mentionedAgentIds }),
-      });
+      const resp = await apiRequest("POST", `/api/conversations/${activeConvId}/chat`, { content: text, mentionedAgentIds });
       if (!resp.body) throw new Error("No response body");
 
       const reader = resp.body.getReader();
@@ -239,7 +341,8 @@ export default function ChatPage({ workspaceId }: Props) {
               return next;
             });
           } else if (event.type === "agent_start") {
-            const { agentId, agentName } = event;
+            const { agentId, agentName, bypassed } = event;
+            currentCoordinatorAgentId = agentId;
             const placeholder: StreamingMsg = {
               id: `streaming-${agentId}`,
               role: "streaming",
@@ -247,11 +350,13 @@ export default function ChatPage({ workspaceId }: Props) {
               agentName,
               content: "",
               streaming: true,
+              subtasks: [],
               conversationId: activeConvId,
               mentions: [],
               messageType: "text",
               metadata: {},
               createdAt: new Date(),
+              bypassed: bypassed === true,
             };
             setDisplayMessages(prev => [...prev, placeholder]);
           } else if (event.type === "code_running") {
@@ -277,6 +382,60 @@ export default function ChatPage({ workspaceId }: Props) {
             ));
           } else if (event.type === "agent_error") {
             setDisplayMessages(prev => prev.filter(m => m.id !== `streaming-${event.agentId}`));
+          } else if (event.type === "subtask_start") {
+            if (!currentCoordinatorAgentId) continue;
+            const coordId = currentCoordinatorAgentId;
+            const newSubtask: SubtaskState = {
+              id: event.subtaskId,
+              agentId: event.agentId,
+              agentName: event.agentName,
+              status: "running",
+              output: "",
+            };
+            setDisplayMessages(prev => prev.map(m =>
+              m.id === `streaming-${coordId}` && m.role === "streaming"
+                ? { ...m, subtasks: [...((m as StreamingMsg).subtasks ?? []), newSubtask] }
+                : m
+            ));
+          } else if (event.type === "subtask_chunk") {
+            if (!currentCoordinatorAgentId) continue;
+            const coordId = currentCoordinatorAgentId;
+            setDisplayMessages(prev => prev.map(m =>
+              m.id === `streaming-${coordId}` && m.role === "streaming"
+                ? {
+                    ...m,
+                    subtasks: ((m as StreamingMsg).subtasks ?? []).map(st =>
+                      st.id === event.subtaskId ? { ...st, output: st.output + event.content } : st
+                    ),
+                  }
+                : m
+            ));
+          } else if (event.type === "subtask_done") {
+            if (!currentCoordinatorAgentId) continue;
+            const coordId = currentCoordinatorAgentId;
+            setDisplayMessages(prev => prev.map(m =>
+              m.id === `streaming-${coordId}` && m.role === "streaming"
+                ? {
+                    ...m,
+                    subtasks: ((m as StreamingMsg).subtasks ?? []).map(st =>
+                      st.id === event.subtaskId ? { ...st, status: "done", output: event.output } : st
+                    ),
+                  }
+                : m
+            ));
+          } else if (event.type === "subtask_error") {
+            if (!currentCoordinatorAgentId) continue;
+            const coordId = currentCoordinatorAgentId;
+            setDisplayMessages(prev => prev.map(m =>
+              m.id === `streaming-${coordId}` && m.role === "streaming"
+                ? {
+                    ...m,
+                    subtasks: ((m as StreamingMsg).subtasks ?? []).map(st =>
+                      st.id === event.subtaskId ? { ...st, status: "error", output: event.error } : st
+                    ),
+                  }
+                : m
+            ));
           }
         }
       }
@@ -284,6 +443,10 @@ export default function ChatPage({ workspaceId }: Props) {
       console.error("Chat error:", err);
     } finally {
       setIsStreaming(false);
+      // Refresh conversation list so auto-generated title is picked up
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: [`/api/workspaces/${workspaceId}/conversations`] });
+      }, 2500);
     }
   };
 
@@ -295,11 +458,7 @@ export default function ChatPage({ workspaceId }: Props) {
     });
 
     try {
-      const resp = await fetch(`/api/conversations/${convId}/messages/${msgId}/confirm`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ approved: true }),
-      });
+      const resp = await apiRequest("POST", `/api/conversations/${convId}/messages/${msgId}/confirm`, { approved: true });
       if (!resp.body) throw new Error("No response body");
 
       const reader = resp.body.getReader();
@@ -370,11 +529,7 @@ export default function ChatPage({ workspaceId }: Props) {
       return next;
     });
     try {
-      await fetch(`/api/conversations/${convId}/messages/${msgId}/confirm`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ approved: false }),
-      });
+      await apiRequest("POST", `/api/conversations/${convId}/messages/${msgId}/confirm`, { approved: false });
     } catch {}
   }, []);
 
@@ -419,31 +574,85 @@ export default function ChatPage({ workspaceId }: Props) {
         <ScrollArea className="flex-1 py-1">
           <div className="px-2 space-y-0.5">
             {convsLoading && <p className="text-xs text-muted-foreground px-2 py-2">Loading…</p>}
-            {allConvs.map(conv => (
-              <div
-                key={conv.id}
-                className={cn(
-                  "group flex items-center justify-between gap-1 px-2 py-1.5 rounded-md cursor-pointer text-xs transition-colors",
-                  activeConvId === conv.id
-                    ? "bg-accent text-accent-foreground"
-                    : "text-muted-foreground hover:bg-accent/50"
-                )}
-                onClick={() => setActiveConvId(conv.id)}
-                data-testid={`conv-item-${conv.id}`}
-              >
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <MessageSquare className="w-3 h-3 shrink-0" />
-                  <span className="truncate">{conv.title}</span>
-                </div>
-                <button
-                  className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive transition-opacity shrink-0"
-                  onClick={(e) => { e.stopPropagation(); deleteConvMutation.mutate(conv.id); }}
-                  data-testid={`button-delete-conv-${conv.id}`}
+            {allConvs.map(conv => {
+              const isActive = activeConvId === conv.id;
+              const isEditing = editingConvId === conv.id;
+              return (
+                <div
+                  key={conv.id}
+                  className={cn(
+                    "flex items-center gap-1 px-2 py-1.5 rounded-md text-xs transition-colors cursor-pointer",
+                    isEditing
+                      ? "bg-accent/70"
+                      : isActive
+                        ? "bg-accent text-accent-foreground"
+                        : "text-muted-foreground hover:bg-accent/50"
+                  )}
+                  onClick={() => !isEditing && setActiveConvId(conv.id)}
+                  data-testid={`conv-item-${conv.id}`}
                 >
-                  <Trash2 className="w-3 h-3" />
-                </button>
-              </div>
-            ))}
+                  <MessageSquare className="w-3 h-3 shrink-0 opacity-60" />
+
+                  {isEditing ? (
+                    /* ── Inline edit mode ── */
+                    <div className="flex items-center gap-1 flex-1 min-w-0" onClick={e => e.stopPropagation()}>
+                      <input
+                        autoFocus
+                        value={editingTitle}
+                        onChange={e => setEditingTitle(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === "Enter") commitRename(conv.id);
+                          if (e.key === "Escape") setEditingConvId(null);
+                        }}
+                        onBlur={() => commitRename(conv.id)}
+                        className="flex-1 min-w-0 bg-transparent border-b border-primary outline-none text-xs text-foreground py-0.5"
+                        data-testid={`input-rename-conv-${conv.id}`}
+                      />
+                      <button
+                        onMouseDown={e => { e.preventDefault(); commitRename(conv.id); }}
+                        className="text-primary hover:text-primary/80 shrink-0"
+                        data-testid={`button-confirm-rename-${conv.id}`}
+                      >
+                        <Check className="w-3 h-3" />
+                      </button>
+                      <button
+                        onMouseDown={e => { e.preventDefault(); setEditingConvId(null); }}
+                        className="text-muted-foreground hover:text-foreground shrink-0"
+                        data-testid={`button-cancel-rename-${conv.id}`}
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ) : (
+                    /* ── Normal display mode ── */
+                    <>
+                      <span className="truncate flex-1">{conv.title}</span>
+                      {/* Action buttons — always visible on the active item */}
+                      {isActive && (
+                        <div className="flex items-center gap-0.5 shrink-0 ml-1">
+                          <button
+                            className="p-0.5 rounded hover:bg-accent-foreground/10 text-accent-foreground/70 hover:text-accent-foreground"
+                            onClick={e => startEditing(conv, e)}
+                            title="Rename"
+                            data-testid={`button-rename-conv-${conv.id}`}
+                          >
+                            <Pencil className="w-3 h-3" />
+                          </button>
+                          <button
+                            className="p-0.5 rounded hover:bg-accent-foreground/10 text-accent-foreground/70 hover:text-destructive"
+                            onClick={e => { e.stopPropagation(); deleteConvMutation.mutate(conv.id); }}
+                            title="Delete"
+                            data-testid={`button-delete-conv-${conv.id}`}
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              );
+            })}
             {!convsLoading && allConvs.length === 0 && (
               <p className="text-xs text-muted-foreground px-2 py-2">No conversations yet</p>
             )}
@@ -451,27 +660,15 @@ export default function ChatPage({ workspaceId }: Props) {
         </ScrollArea>
 
         <div className="border-t p-3">
-          <div className="text-[10px] font-semibold text-muted-foreground/50 uppercase tracking-wider mb-2">Agents</div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-[10px] font-semibold text-muted-foreground/50 uppercase tracking-wider">Agents</div>
+            {agents.length > 0 && (
+              <span className="text-[10px] text-muted-foreground/40 tabular-nums">{agents.length}</span>
+            )}
+          </div>
           {agents.length === 0
             ? <p className="text-xs text-muted-foreground/60">No agents</p>
-            : (
-              <div className="space-y-1.5">
-                {agents.map(agent => (
-                  <div key={agent.id} className="flex items-center gap-2">
-                    <div className={cn(
-                      "w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shrink-0",
-                      PROVIDER_COLORS[agent.provider] ?? "bg-zinc-500"
-                    )}>
-                      {agent.name[0].toUpperCase()}
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-xs truncate text-foreground/80">{agent.name}</div>
-                      <div className="text-[10px] text-muted-foreground/60 truncate">{agent.provider}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )
+            : <AgentRoster agents={agents} onMention={quickMention} />
           }
         </div>
       </div>
@@ -613,17 +810,47 @@ interface ConfirmationCardProps {
   onCancel: () => void;
 }
 
+type PreflightOperation = {
+  tool: string;
+  description: string;
+  riskLevel: "read-only" | "creates" | "modifies" | "deletes";
+};
+
+type PreflightData = {
+  summary: string;
+  operations: PreflightOperation[];
+};
+
+function RiskBadge({ level }: { level: PreflightOperation["riskLevel"] }) {
+  const config = {
+    "read-only":  { icon: ShieldCheck,  label: "read-only", cls: "text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950/40 border-green-200 dark:border-green-800" },
+    "creates":   { icon: PlusCircle,   label: "creates",   cls: "text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 border-blue-200 dark:border-blue-800" },
+    "modifies":  { icon: ShieldAlert,  label: "modifies",  cls: "text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800" },
+    "deletes":   { icon: ShieldOff,    label: "deletes",   cls: "text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800" },
+  }[level] ?? { icon: AlertCircle, label: level, cls: "text-muted-foreground bg-muted border-border" };
+  const Icon = config.icon;
+  return (
+    <span className={cn("inline-flex items-center gap-0.5 text-[10px] font-medium border rounded px-1.5 py-0.5 shrink-0", config.cls)}>
+      <Icon className="w-2.5 h-2.5" />
+      {config.label}
+    </span>
+  );
+}
+
 function ConfirmationCard({ message, confirmState, onApprove, onCancel }: ConfirmationCardProps) {
   const [logsOpen, setLogsOpen] = useState(false);
   const meta = (message.metadata ?? {}) as Record<string, unknown>;
   const agentName = meta.agentName as string ?? "Agent";
   const proposedAction = meta.proposedAction as string ?? "";
+  const preflight = meta.preflight as PreflightData | null ?? null;
   const { status, logs, streamedContent } = confirmState;
 
   const isPending = status === "pending";
   const isRunning = status === "running";
   const isDone = status === "completed" || status === "failed";
   const isCancelled = status === "cancelled";
+
+  const hasWriteOps = preflight?.operations?.some(op => op.riskLevel !== "read-only");
 
   return (
     <div
@@ -641,22 +868,54 @@ function ConfirmationCard({ message, confirmState, onApprove, onCancel }: Confir
         </div>
 
         <div className="bg-muted border rounded-xl overflow-hidden">
-          <div className="px-4 py-3">
-            <div className="flex items-start gap-2 mb-3">
-              <Terminal className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
-              <div className="min-w-0">
-                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">Requested action</p>
-                <p className="text-sm text-foreground font-mono break-all bg-background/60 rounded-md px-2 py-1.5">
-                  {proposedAction}
-                </p>
+          <div className="px-4 py-3 space-y-3">
+
+            {/* Preflight summary and operations */}
+            {preflight ? (
+              <div>
+                {preflight.summary && (
+                  <p className="text-sm text-foreground mb-2">{preflight.summary}</p>
+                )}
+                {preflight.operations?.length > 0 && (
+                  <div className="space-y-1.5">
+                    <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">Predicted operations</p>
+                    <div className="space-y-1">
+                      {preflight.operations.map((op, i) => (
+                        <div key={i} className="flex items-start gap-2 bg-background/60 rounded-md px-2.5 py-1.5">
+                          <RiskBadge level={op.riskLevel} />
+                          <div className="min-w-0">
+                            <p className="text-xs text-foreground">{op.description}</p>
+                            <p className="text-[10px] text-muted-foreground font-mono mt-0.5">{op.tool}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
+            ) : (
+              <div className="flex items-start gap-2">
+                <Terminal className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">Requested action</p>
+                  <p className="text-sm text-foreground font-mono break-all bg-background/60 rounded-md px-2 py-1.5">
+                    {proposedAction}
+                  </p>
+                </div>
+              </div>
+            )}
 
-            <p className="text-xs text-muted-foreground/80 mb-3 flex items-center gap-1">
-              <AlertCircle className="w-3 h-3 shrink-0" />
-              This will execute in an isolated environment using your cloud credentials.
-            </p>
+            {/* Warning for write operations */}
+            {isPending && (
+              <p className="text-xs text-muted-foreground/80 flex items-center gap-1">
+                <AlertCircle className="w-3 h-3 shrink-0" />
+                {hasWriteOps
+                  ? "This will make changes using your cloud credentials. Review carefully before approving."
+                  : "This will execute in an isolated environment using your cloud credentials."}
+              </p>
+            )}
 
+            {/* Action buttons */}
             {isPending && (
               <div className="flex gap-2">
                 <Button
@@ -796,10 +1055,46 @@ function SourcesAccordion({ sources }: { sources: SourceChunk[] }) {
   );
 }
 
+function SubtaskPanel({ subtasks }: { subtasks: SubtaskState[] }) {
+  return (
+    <div className="mb-2 rounded-xl border border-primary/20 bg-background/60 p-2.5 space-y-1.5" data-testid="subtask-panel">
+      <div className="flex items-center gap-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+        <GitFork className="w-3 h-3" />
+        Parallel subtasks ({subtasks.length})
+      </div>
+      {subtasks.map(st => (
+        <div key={st.id} className="flex items-start gap-2 text-xs" data-testid={`subtask-${st.id}`}>
+          <div className="shrink-0 mt-0.5">
+            {st.status === "running" && <Loader2 className="w-3 h-3 animate-spin text-primary" />}
+            {st.status === "done" && <CheckCircle className="w-3 h-3 text-green-500" />}
+            {st.status === "error" && <XCircle className="w-3 h-3 text-destructive" />}
+          </div>
+          <div className="min-w-0 flex-1">
+            <span className="font-medium text-foreground">{st.agentName}</span>
+            {st.status === "running" && !st.output && (
+              <span className="text-muted-foreground animate-pulse"> — working…</span>
+            )}
+            {st.output && (
+              <p className={cn(
+                "mt-0.5 line-clamp-2 leading-relaxed",
+                st.status === "running" ? "text-muted-foreground/60 italic" : "text-muted-foreground"
+              )}>
+                {st.output}
+              </p>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function MessageBubble({ message, isTaskResult }: { message: DisplayMessage; isTaskResult?: boolean }) {
   const isUser = message.role === "user";
   const isStreaming = (message as StreamingMsg).streaming === true;
   const codeRunning = (message as StreamingMsg).codeRunning;
+  const subtasks = (message as StreamingMsg).subtasks ?? [];
+  const bypassed = (message as StreamingMsg).bypassed === true;
   const agentName = (message as any).agentName as string | undefined;
   const meta = (message as any).metadata as Record<string, unknown> | undefined;
   const sources = (meta?.sources as SourceChunk[] | undefined) ?? [];
@@ -828,8 +1123,19 @@ function MessageBubble({ message, isTaskResult }: { message: DisplayMessage; isT
             <span className="text-xs font-semibold text-foreground">
               {isTaskResult ? `${agentName ?? "Agent"} · Task Result` : (agentName ?? "Agent")}
             </span>
-            {isStreaming && !codeRunning && (
+            {bypassed && (
+              <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded px-1.5 py-0.5">
+                <Zap className="w-2.5 h-2.5" /> approval bypassed
+              </span>
+            )}
+            {isStreaming && !codeRunning && subtasks.length === 0 && (
               <span className="text-[11px] text-muted-foreground animate-pulse">typing…</span>
+            )}
+            {isStreaming && subtasks.some(st => st.status === "running") && (
+              <span className="flex items-center gap-1 text-[11px] text-primary">
+                <GitFork className="w-3 h-3 animate-pulse" />
+                delegating…
+              </span>
             )}
             {codeRunning && (
               <span className="flex items-center gap-1 text-[11px] text-blue-500">
@@ -838,6 +1144,9 @@ function MessageBubble({ message, isTaskResult }: { message: DisplayMessage; isT
               </span>
             )}
           </div>
+        )}
+        {isStreaming && subtasks.length > 0 && (
+          <SubtaskPanel subtasks={subtasks} />
         )}
         <div className={cn(
           "rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words",

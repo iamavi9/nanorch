@@ -7,6 +7,8 @@ export type AuthUser = {
   username: string | null;
   name: string | null;
   role: "admin" | "member";
+  csrfToken?: string;
+  workspaceAdminIds: string[];
 };
 
 export function useAuth() {
@@ -19,7 +21,15 @@ export function useAuth() {
   const isAdmin = user?.role === "admin";
   const isMember = user?.role === "member";
 
-  return { user: user ?? null, isLoading, isAdmin, isMember };
+  function isWorkspaceAdmin(workspaceId: string): boolean {
+    if (!user) return false;
+    if (user.role === "admin") return true;
+    return (user.workspaceAdminIds ?? []).includes(workspaceId);
+  }
+
+  const isAnyWorkspaceAdmin = (user?.workspaceAdminIds?.length ?? 0) > 0;
+
+  return { user: user ?? null, isLoading, isAdmin, isMember, isWorkspaceAdmin, isAnyWorkspaceAdmin };
 }
 
 export function useLogout() {

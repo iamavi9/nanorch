@@ -101,16 +101,22 @@ export async function executeCodeInSandbox(
   });
 }
 
-const LOCAL_RUNNERS: Record<string, { cmd: string; ext: string }> = {
-  python: { cmd: "python3", ext: "py" },
-  python3: { cmd: "python3", ext: "py" },
-  javascript: { cmd: "node", ext: "js" },
-  js: { cmd: "node", ext: "js" },
-  node: { cmd: "node", ext: "js" },
-  typescript: { cmd: "node", ext: "js" },
-  ts: { cmd: "node", ext: "js" },
-  bash: { cmd: "bash", ext: "sh" },
-  sh: { cmd: "bash", ext: "sh" },
+const LOCAL_RUNNERS: Record<string, { cmd: string; ext: string; extraArgs?: string[] }> = {
+  python:     { cmd: "python3", ext: "py" },
+  python3:    { cmd: "python3", ext: "py" },
+  javascript: { cmd: "node",    ext: "js" },
+  js:         { cmd: "node",    ext: "js" },
+  node:       { cmd: "node",    ext: "js" },
+  typescript: { cmd: "node",    ext: "js" },
+  ts:         { cmd: "node",    ext: "js" },
+  bash:       { cmd: "bash",    ext: "sh" },
+  sh:         { cmd: "bash",    ext: "sh" },
+  shell:      { cmd: "bash",    ext: "sh" },
+  ruby:       { cmd: "ruby",    ext: "rb" },
+  r:          { cmd: "Rscript", ext: "R"  },
+  rscript:    { cmd: "Rscript", ext: "R"  },
+  go:         { cmd: "go",      ext: "go", extraArgs: ["run"] },
+  java:       { cmd: "java",    ext: "java", extraArgs: ["--source", "21"] },
 };
 
 export async function executeCodeLocally(
@@ -122,7 +128,7 @@ export async function executeCodeLocally(
   if (!runner) {
     return {
       stdout: "",
-      stderr: `Language '${language}' is not available for local execution. Supported: python, javascript, bash.`,
+      stderr: `Language '${language}' is not available for local execution. Supported: python, javascript, bash, ruby, r, go, java.`,
       exitCode: 1,
       infraError: false,
     };
@@ -140,7 +146,7 @@ export async function executeCodeLocally(
   }
 
   return new Promise((resolve) => {
-    const proc = spawn(runner.cmd, [tmpFile]);
+    const proc = spawn(runner.cmd, [...(runner.extraArgs ?? []), tmpFile]);
 
     let stdout = "";
     let stderr = "";
@@ -168,8 +174,13 @@ export async function executeCodeLocally(
     proc.on("error", (err) => {
       clearTimeout(timer);
       try { unlinkSync(tmpFile); } catch {}
+      const rtLabel: Record<string, string> = {
+        python3: "Python", node: "Node.js", bash: "Bash",
+        ruby: "Ruby", Rscript: "R (Rscript)", go: "Go", java: "Java",
+      };
+      const rtName = rtLabel[runner.cmd] ?? runner.cmd;
       const msg = err.message.includes("ENOENT") || err.message.includes("not found")
-        ? `${runner.cmd} is not installed on this server`
+        ? `${rtName} is not installed on this server`
         : `Failed to execute: ${err.message}`;
       resolve({ stdout: "", stderr: msg, exitCode: 1, infraError: false });
     });

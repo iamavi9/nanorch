@@ -36,6 +36,7 @@ export interface RunAgentOptions {
 export interface RunAgentResult {
   content: string;
   toolCalls?: ToolCall[];
+  usage?: { inputTokens: number; outputTokens: number };
 }
 
 export interface ProviderModelInfo {

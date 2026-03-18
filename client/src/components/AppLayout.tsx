@@ -1,7 +1,8 @@
 import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { Bot, LayoutDashboard, Network, Radio, ListTodo, ChevronLeft, Moon, Sun, Zap, Plug, MessageSquare, Users, LogOut } from "lucide-react";
+import { Bot, LayoutDashboard, Network, Radio, ListTodo, ChevronLeft, Moon, Sun, Zap, Plug, MessageSquare, Users, LogOut, Clock, ShieldAlert, GitBranch, BarChart2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { useTheme } from "./ThemeProvider";
 import { APP_NAME } from "@/lib/config";
 import { useAuth, useLogout } from "@/hooks/useAuth";
@@ -28,13 +29,23 @@ export default function AppLayout({ workspaceId, children }: AppLayoutProps) {
     queryKey: [`/api/workspaces/${workspaceId}/orchestrators`],
   });
 
+  const { data: pendingCount } = useQuery<{ count: number }>({
+    queryKey: [`/api/workspaces/${workspaceId}/approvals/pending-count`],
+    refetchInterval: 30000,
+  });
+
   const basePath = `/workspaces/${workspaceId}`;
+  const pendingApprovals = pendingCount?.count ?? 0;
 
   const navItems = [
     { label: "Dashboard", icon: LayoutDashboard, path: basePath },
     { label: "Chat", icon: MessageSquare, path: `${basePath}/chat` },
     { label: "Members", icon: Users, path: `${basePath}/members` },
     { label: "Integrations", icon: Plug, path: `${basePath}/integrations` },
+    { label: "Scheduled Jobs", icon: Clock, path: `${basePath}/scheduled-jobs` },
+    { label: "Pipelines", icon: GitBranch, path: `${basePath}/pipelines`, badge: null },
+    { label: "Approvals", icon: ShieldAlert, path: `${basePath}/approvals`, badge: pendingApprovals > 0 ? pendingApprovals : null },
+    { label: "Observability", icon: BarChart2, path: `${basePath}/observability`, badge: null },
   ];
 
   return (
@@ -76,7 +87,12 @@ export default function AppLayout({ workspaceId, children }: AppLayoutProps) {
                 )}
               >
                 <item.icon className="w-4 h-4" />
-                {item.label}
+                <span className="flex-1">{item.label}</span>
+                {(item as any).badge != null && (
+                  <Badge className="h-4 min-w-4 px-1 text-[10px] bg-yellow-500 hover:bg-yellow-500 text-white">
+                    {(item as any).badge}
+                  </Badge>
+                )}
               </Link>
             ))}
 
