@@ -4,7 +4,6 @@ dist
 server/public
 vite.config.ts.*
 *.tar.gz
-secrets/
 attached_*
 .env
 .env.local

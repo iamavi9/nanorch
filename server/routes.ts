@@ -16,7 +16,7 @@ import { getToolsForProvider, detectProviderFromToolName, CODE_INTERPRETER_TOOL,
 import type { ToolDefinition } from "./providers";
 import { runCode } from "./engine/sandbox-executor";
 import { executeTask } from "./engine/executor";
-import { db } from "./db";
+import { db, pool } from "./db";
 import { tasks } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { hashPassword, verifyPassword, requireAuth, requireAdmin, requireWorkspaceAdmin } from "./lib/auth";
@@ -28,6 +28,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { loadSecret } from "./lib/secrets";
 import { handleSlackEvent } from "./comms/slack-handler";
 import { handleTeamsEvent } from "./comms/teams-handler";
+import { createInferenceProxyRouter } from "./proxy/inference-proxy";
 
 // ── Chat title generator ───────────────────────────────────────────────────────
 async function generateChatTitle(firstMessage: string): Promise<string> {
@@ -299,6 +300,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   startQueueWorker();
 
+  // ── Inference proxy ────────────────────────────────────────────────────────
+  // Mounted BEFORE the global API rate-limiter so it only counts against its
+  // own budget.  Access is gated by short-lived task tokens, not sessions —
+  // only agent containers that are actively running a task can reach it.
+  app.use("/internal/proxy", createInferenceProxyRouter());
+
   app.use(apiLimiter);
 
   // Trust reverse-proxy headers (X-Forwarded-For, X-Forwarded-Proto).
@@ -308,7 +315,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   const PgSession = connectPgSimple(session);
   app.use(session({
-    secret: process.env.SESSION_SECRET || "nanoorch-dev-secret",
+    // loadSecret checks SESSION_SECRET_FILE first (Docker secrets mount),
+    // then falls back to SESSION_SECRET env var.
+    secret: loadSecret("SESSION_SECRET") || "nanoorch-dev-secret",
     resave: false,
     saveUninitialized: false,
     cookie: {
@@ -321,10 +330,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       secure: process.env.COOKIE_SECURE === "true",
       maxAge: 7 * 24 * 60 * 60 * 1000,
     },
-    // PostgreSQL-backed session store — sessions survive container restarts
-    // and are not lost under memory pressure like the in-memory store.
+    // Reuse the application's pg.Pool so the session store shares the same
+    // connection pool as Drizzle.  This avoids a second DATABASE_URL read and
+    // keeps the connection count low.
     store: new PgSession({
-      conString: process.env.DATABASE_URL,
+      pool,
       tableName: "user_sessions",
       pruneSessionInterval: 60 * 60, // prune expired sessions hourly
     }),
@@ -1730,7 +1740,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // ── Seed default admin on startup ─────────────────────────────────────────
   (async () => {
     const adminUsername = process.env.ADMIN_USERNAME || "admin";
-    const configuredPassword = process.env.ADMIN_PASSWORD;
+    // loadSecret checks ADMIN_PASSWORD_FILE first (Docker secrets), then
+    // falls back to the plain ADMIN_PASSWORD environment variable.
+    const configuredPassword = loadSecret("ADMIN_PASSWORD");
 
     const existing = await storage.getUserByUsername(adminUsername);
     if (!existing) {

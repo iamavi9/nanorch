@@ -9,9 +9,15 @@ import { taskLogEmitter } from "./emitter";
 import type { Orchestrator, Agent } from "@shared/schema";
 import type { ProviderMessage } from "../providers";
 import { executeCodeInSandbox } from "./sandbox-executor";
+import { issueTaskToken, revokeTaskToken } from "../proxy/inference-proxy";
 
 const MAX_TOOL_ROUNDS = 10;
 const CONTAINER_TIMEOUT_MS = 180_000;
+
+// Optional gVisor runtime for agent containers.
+// Set AGENT_RUNTIME=runsc to enable kernel-level isolation via gVisor.
+// Leave unset (or set to "runc") to use the default container runtime.
+const AGENT_RUNTIME = process.env.AGENT_RUNTIME ?? "";
 
 export function isDockerAvailable(): boolean {
   return !!process.env.DOCKER_SOCKET;
@@ -35,8 +41,14 @@ export async function executeTaskInDocker(taskId: string): Promise<void> {
     taskLogEmitter.emit(`task:${taskId}`, { ...entry, timestamp: entry.timestamp ?? new Date() });
   };
 
+  // Issue a short-lived proxy token for this task.  The agent container
+  // receives this token instead of real API keys; the inference proxy on
+  // the host verifies it and injects the real credential server-side.
+  const taskToken = issueTaskToken(taskId);
+
   try {
     await log("info", `Task started in Docker sandbox — provider: ${orchestrator.provider}, model: ${orchestrator.model}`);
+    await log("info", "Inference proxy: real API keys will not be passed to the container");
 
     const cloudCreds = await loadCloudCredentials(orchestrator.workspaceId, log);
     const availableTools = buildToolList(cloudCreds);
@@ -73,6 +85,7 @@ export async function executeTaskInDocker(taskId: string): Promise<void> {
         systemPrompt,
         messages,
         tools: availableTools,
+        taskToken,
         log,
       });
 
@@ -147,6 +160,7 @@ export async function executeTaskInDocker(taskId: string): Promise<void> {
         systemPrompt,
         messages: [...messages, { role: "user", content: "Please provide your final answer based on the tool results above." }],
         tools: [],
+        taskToken,
         log,
       });
       if (finalResult.type === "result") {
@@ -174,6 +188,10 @@ export async function executeTaskInDocker(taskId: string): Promise<void> {
       errorMessage: message,
       completedAt: new Date(),
     });
+  } finally {
+    // Always revoke the proxy token — containers can no longer call AI APIs
+    // after the task finishes, regardless of how it ended.
+    revokeTaskToken(taskId);
   }
 }
 
@@ -189,15 +207,25 @@ async function runInContainer(opts: {
   systemPrompt: string;
   messages: ProviderMessage[];
   tools: ReturnType<typeof buildToolList>;
+  taskToken: string;
   log: (level: "info" | "warn" | "error", msg: string) => Promise<void>;
 }): Promise<ContainerResult> {
-  const { taskId, round, orchestrator, agent, systemPrompt, messages, tools, log } = opts;
+  const { taskId, round, orchestrator, agent, systemPrompt, messages, tools, taskToken, log } = opts;
 
   const agentImage = process.env.AGENT_IMAGE ?? "nanoorch-agent:latest";
 
   const messagesB64 = Buffer.from(JSON.stringify(messages)).toString("base64");
   const toolsB64 = Buffer.from(JSON.stringify(tools)).toString("base64");
 
+  // Determine the inference proxy base URL.
+  // Agent containers reach the NanoOrch host via the special hostname
+  // host.docker.internal (resolved via --add-host below).
+  const hostPort = process.env.PORT ?? "5000";
+  const proxyBase = `http://host.docker.internal:${hostPort}/internal/proxy`;
+
+  // The container receives a short-lived task token instead of real API keys.
+  // The inference proxy on the host verifies the token and injects the real
+  // credential before forwarding to the upstream provider.
   const envArgs: string[] = [
     "--env", `TASK_ID=${taskId}`,
     "--env", `PROVIDER=${orchestrator.provider}`,
@@ -207,10 +235,15 @@ async function runInContainer(opts: {
     "--env", `SYSTEM_PROMPT=${systemPrompt}`,
     "--env", `MESSAGES_JSON=${messagesB64}`,
     "--env", `TOOLS_JSON=${toolsB64}`,
+    // Pass the task token as every provider key — the proxy accepts it for any
+    // configured provider regardless of which "key" the SDK sends.
+    "--env", `OPENAI_API_KEY=${taskToken}`,
+    "--env", `OPENAI_BASE_URL=${proxyBase}/openai/v1`,
+    "--env", `ANTHROPIC_API_KEY=${taskToken}`,
+    "--env", `ANTHROPIC_BASE_URL=${proxyBase}/anthropic`,
+    "--env", `GEMINI_API_KEY=${taskToken}`,
+    "--env", `GEMINI_BASE_URL=${proxyBase}/gemini`,
   ];
-
-  const apiKeyEnvs = buildApiKeyEnvArgs();
-  envArgs.push(...apiKeyEnvs);
 
   const containerName = `nanoorch-agent-${taskId.slice(0, 8)}-r${round}`;
 
@@ -220,6 +253,24 @@ async function runInContainer(opts: {
     "--memory", "512m",
     "--cpus", "0.5",
     "--network", "bridge",
+    // Resolve host.docker.internal → Docker bridge gateway so the container
+    // can reach the NanoOrch inference proxy running on the host.
+    "--add-host", "host.docker.internal:host-gateway",
+    // Drop all Linux capabilities — the agent container only needs to make
+    // outbound HTTPS calls; no special capabilities are required for that.
+    "--cap-drop", "ALL",
+    // Prevent any in-container process from gaining new privileges via setuid
+    // binaries or filesystem capabilities.
+    "--security-opt", "no-new-privileges",
+    // Optional gVisor isolation.  Set AGENT_RUNTIME=runsc in the environment
+    // to enable kernel-level sandboxing for agent containers.
+    ...(AGENT_RUNTIME && AGENT_RUNTIME !== "runc"
+      ? ["--runtime", AGENT_RUNTIME]
+      : []),
+    // Optional custom seccomp profile (host path).
+    ...(process.env.SECCOMP_PROFILE
+      ? ["--security-opt", `seccomp=${process.env.SECCOMP_PROFILE}`]
+      : []),
     ...envArgs,
     agentImage,
   ];
@@ -286,21 +337,6 @@ async function runInContainer(opts: {
   });
 }
 
-function buildApiKeyEnvArgs(): string[] {
-  const args: string[] = [];
-  const keys: Array<[string, string]> = [
-    ["OPENAI_API_KEY", process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? ""],
-    ["OPENAI_BASE_URL", process.env.AI_INTEGRATIONS_OPENAI_BASE_URL ?? "https://api.openai.com/v1"],
-    ["ANTHROPIC_API_KEY", process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? ""],
-    ["ANTHROPIC_BASE_URL", process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL ?? "https://api.anthropic.com"],
-    ["GEMINI_API_KEY", process.env.AI_INTEGRATIONS_GEMINI_API_KEY ?? ""],
-    ["GEMINI_BASE_URL", process.env.AI_INTEGRATIONS_GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com"],
-  ];
-  for (const [k, v] of keys) {
-    if (v) args.push("--env", `${k}=${v}`);
-  }
-  return args;
-}
 
 async function loadCloudCredentials(
   workspaceId: string,

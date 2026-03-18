@@ -33,13 +33,19 @@ A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, 
 
 ## Screenshots
 
-> Screenshots will be added before the first public release. See [`docs/screenshots/README.md`](./docs/screenshots/README.md) for contributor instructions on what to capture and how to name the files.
+### Login
+
+![Login](./docs/screenshots/login.png)
+
+*Session-based login page — username and password. First-time default credentials are `admin` / `admin` (overridable with `ADMIN_USERNAME`/`ADMIN_PASSWORD` env vars).*
+
+---
 
 ### Workspaces
 
 ![Workspaces list](./docs/screenshots/workspaces.png)
 
-*Multi-tenant workspace list — Comms badge, resource indicators, and per-workspace admin actions (edit, limits, delete) revealed on hover.*
+*Multi-tenant workspace list — Comms badge marks workspaces enabled for two-way Slack/Teams inbound; per-workspace admin actions (edit, limits, delete) via hover.*
 
 ---
 
@@ -47,15 +53,23 @@ A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, 
 
 ![Chat UI](./docs/screenshots/chat.png)
 
-*Per-workspace chat with `@agent` mention autocomplete (keyboard navigation), live streaming responses, and inline code execution output.*
+*Per-workspace chat with `@agent` mention autocomplete (keyboard navigation), live streaming responses, and inline code execution output (Python and Node.js). Conversation history in the left sidebar.*
 
 ---
 
-### Task Queue & Live Logs
+### Code Sandbox Execution
+
+![Code sandbox](./docs/screenshots/executor.png)
+
+*`</> running python in sandbox…` indicator streams in the chat while the agent executes code inside the gVisor-isolated container.*
+
+---
+
+### Task Queue
 
 ![Task queue](./docs/screenshots/tasks.png)
 
-*Task queue with status badges (queued / running / completed / failed), real-time SSE log streaming panel, and token usage per task.*
+*Task queue showing summary counters (Pending / Running / Completed / Failed) and a scrollable task list with status badges, agent name, and relative timestamp.*
 
 ---
 
@@ -63,7 +77,7 @@ A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, 
 
 ![Approval gates](./docs/screenshots/approvals.png)
 
-*Pending approval card — proposed action, impact description, and one-click Approve / Reject controls with reviewer audit trail.*
+*Approval gate — the agent pauses with a full description of the proposed action, a **Predicted Operations** panel showing each tool call and a `read-only` or `write` impact badge, and one-click **Approve & Run** / **Cancel** controls.*
 
 ---
 
@@ -71,7 +85,7 @@ A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, 
 
 ![Pipelines](./docs/screenshots/pipelines.png)
 
-*Pipeline builder with ordered steps, per-step agent and prompt configuration, cron scheduling, and per-run step history.*
+*Pipeline list with run history — each run shows status, trigger (Manual / Scheduled), and timestamp. Expand to see per-step output.*
 
 ---
 
@@ -79,7 +93,7 @@ A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, 
 
 ![Observability](./docs/screenshots/observability.png)
 
-*Token usage and cost analytics — 30-day daily chart, summary cards (total tokens in/out, estimated cost), per-agent and per-provider breakdown.*
+*Token usage and cost analytics — four summary cards (Total Tokens, Estimated Cost, Agent Calls, Active Agents), a daily input/output token chart over 30 days, and per-agent and provider breakdowns.*
 
 ---
 
@@ -87,7 +101,7 @@ A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, 
 
 ![Two-way comms](./docs/screenshots/comms.png)
 
-*Comms workspace — Slack inbound channel with bot token / signing secret fields, Events Endpoint URL with one-click copy, and Two-way Comms status card.*
+*Comms workspace — Slack inbound channel with **Two-way** and **Active** badges, Events Endpoint URL for Slack App Event Subscriptions, and one-click copy button.*
 
 ---
 
@@ -95,7 +109,39 @@ A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, 
 
 ![Integrations](./docs/screenshots/integrations.png)
 
-*Integrations page — Jira, GitHub, GitLab, AWS, RAGFlow cards with AES-256-GCM encrypted credential state, Test button, and integration mode selector.*
+*Integrations page — grouped by CLOUD, DEVTOOLS, and KNOWLEDGE; each card shows provider, last-used timestamp, integration mode badge (Tool / Context), and Test / Edit / Disable / Delete controls.*
+
+---
+
+### Agent Tool Selection
+
+![Tool selection](./docs/screenshots/tools.png)
+
+*Agent tool configuration panel — tools grouped by integration, individually toggled via checkboxes. AWS tools and all 7 Jira tools shown.*
+
+---
+
+### Scheduled Jobs
+
+![Scheduled jobs](./docs/screenshots/scheduled.png)
+
+*Scheduled Jobs — cron expression, timezone (IANA), next-run and last-run timestamps, **Active** badge, and per-job controls: Run Now, Edit, Pause, Delete.*
+
+---
+
+### RAGFlow Knowledge Base Chat
+
+![RAGFlow chat](./docs/screenshots/ragflow-chat.png)
+
+*Agent answering a question from the connected RAGFlow knowledge base. Source count badge (e.g. "26 sources") appears below the reply.*
+
+---
+
+### RAGFlow Source Citations
+
+![RAGFlow sources](./docs/screenshots/ragflow-chat-sources.png)
+
+*Expanded sources panel — each source document listed with a title and excerpt so users can verify the information and navigate to the original document.*
 
 ---
 
@@ -186,6 +232,8 @@ cd nanoorch
 
 ### 4. Configure environment
 
+**Standard setup (secrets in `.env`):**
+
 ```bash
 cp .env.example .env
 nano .env
@@ -211,6 +259,15 @@ Generate the encryption key in one step:
 echo "ENCRYPTION_KEY=$(openssl rand -hex 32)" >> .env
 ```
 
+> **Hardened deployment (recommended for production):** Use Docker secrets instead of plain `.env` so that sensitive values **never appear in `docker inspect Env`** output. Run the interactive setup helper and use the secrets-specific compose file:
+>
+> ```bash
+> ./secrets/create-secrets.sh        # generates random keys + prompts for passwords
+> docker compose -f docker-compose.secrets.yml up -d
+> ```
+>
+> The app reads credentials via the `_FILE` pattern (`SESSION_SECRET_FILE`, `ADMIN_PASSWORD_FILE`, etc.) — each variable points to a Docker-mounted file at `/run/secrets/<name>` instead of holding the raw value. See [`secrets/README.md`](./secrets/README.md) for the full setup guide.
+
 ---
 
 ### 5. Build the agent images
@@ -231,14 +288,21 @@ docker build -t nanoorch-sandbox:latest ./agent/sandbox
 
 ### 6. Start everything
 
+**Standard (`.env` file):**
 ```bash
 docker compose up -d
+```
+
+**Hardened (Docker secrets):**
+```bash
+docker compose -f docker-compose.secrets.yml up -d
 ```
 
 Database migrations run automatically on first boot. Check the logs:
 
 ```bash
 docker compose logs -f app
+# or: docker compose -f docker-compose.secrets.yml logs -f app
 ```
 
 Look for:
@@ -423,30 +487,105 @@ Conversational messages run in-process with no container overhead.
         ▼  (action tasks only)
   docker run --rm nanoorch-agent:latest
   Ephemeral container per AI inference round
-  AI keys injected via env vars
+  Task token (not real AI keys) passed to container
+  Inference proxy (/internal/proxy) injects real keys server-side
   Integration credentials stay on server
+
+  Security layers (all containers):
+    --cap-drop ALL + --security-opt no-new-privileges (unconditional)
+    --runtime runsc  (gVisor, optional via AGENT_RUNTIME / SANDBOX_RUNTIME)
+    --security-opt seccomp=<profile>  (optional via SECCOMP_PROFILE)
 ```
+
+---
+
+## Security Hardening
+
+NanoOrch is designed for hardened production deployments. The security model has three independent layers that can each be enabled separately.
+
+### Layer 1 — Docker secrets (`_FILE` pattern)
+
+By default, secrets like `SESSION_SECRET` and `ADMIN_PASSWORD` are passed as plain environment variables — visible in `docker inspect Env`. For production, use Docker secrets instead:
+
+```bash
+./secrets/create-secrets.sh           # interactive setup — generates random keys
+docker compose -f docker-compose.secrets.yml up -d
+```
+
+Each secret is stored as a one-line file on the host (e.g. `secrets/session_secret.txt`). Docker mounts it read-only at `/run/secrets/<name>` inside the container. The app reads the value via the `_FILE` pattern — `SESSION_SECRET_FILE=/run/secrets/session_secret` — so `docker inspect` only shows the file path, never the real value.
+
+**Variables with `_FILE` support:** `DATABASE_URL`, `SESSION_SECRET`, `ADMIN_PASSWORD`, `ENCRYPTION_KEY`, `AI_INTEGRATIONS_OPENAI_API_KEY`, `AI_INTEGRATIONS_ANTHROPIC_API_KEY`, `AI_INTEGRATIONS_GEMINI_API_KEY`.
+
+See [`secrets/README.md`](./secrets/README.md) for setup details and rotation guidance.
+
+### Layer 2 — Container isolation (capabilities + seccomp + gVisor)
+
+Every agent task container and code-sandbox container runs with:
+
+| Flag | What it does |
+|------|-------------|
+| `--cap-drop ALL` | Drops all Linux capabilities (unconditional — always applied) |
+| `--security-opt no-new-privileges` | Prevents privilege escalation via setuid binaries (unconditional) |
+| `--security-opt seccomp=<profile>` | Restricts allowed syscalls to ~50 (set `SECCOMP_PROFILE` to enable) |
+| `--runtime runsc` | gVisor user-space kernel — syscalls hit a synthetic kernel, not the host (set `SANDBOX_RUNTIME=runsc` / `AGENT_RUNTIME=runsc`) |
+
+**Seccomp profile:** `agent/seccomp/nanoorch.json` allows only the syscalls needed for HTTP calls and JSON parsing, blocking `ptrace`, `mount`, `clone`, etc. Copy it to a stable host path and set `SECCOMP_PROFILE`:
+
+```bash
+sudo mkdir -p /etc/nanoorch/seccomp
+sudo cp agent/seccomp/nanoorch.json /etc/nanoorch/seccomp/
+# In .env:
+SECCOMP_PROFILE=/etc/nanoorch/seccomp/nanoorch.json
+```
+
+**gVisor** provides kernel-level isolation: even if a container escapes the seccomp filter, it hits gVisor's Go-based synthetic kernel rather than the host kernel. Install `runsc` and set `SANDBOX_RUNTIME=runsc` (for code execution) and/or `AGENT_RUNTIME=runsc` (for action-task agent containers).
+
+### Layer 3 — Inference proxy (AI keys never in containers)
+
+Agent task containers never receive real AI provider keys. Instead:
+
+1. Before spawning a container, the server issues a short-lived **task token** (32 random hex bytes, 15-minute TTL)
+2. The container receives this token as all three provider key env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`) — not the real keys
+3. All AI calls are routed to `/internal/proxy/:provider/*` on the server
+4. The proxy verifies the task token, strips it, injects the real key server-side, and forwards the request
+5. After the task finishes, the token is revoked — the container can no longer call any AI API
+6. `docker inspect` on any agent container shows the task token (now revoked), not your OpenAI/Anthropic/Gemini key
+
+### Recommended production stack
+
+```env
+SANDBOX_RUNTIME=runsc           # gVisor for code-execution sandbox
+AGENT_RUNTIME=runsc             # gVisor for agent action-task containers
+SECCOMP_PROFILE=/etc/nanoorch/seccomp/nanoorch.json
+```
+
+Plus `docker-compose.secrets.yml` for Docker secrets. This gives you all three layers simultaneously.
 
 ---
 
 ## Configuration Reference
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `DATABASE_URL` | Yes | — | PostgreSQL connection string |
-| `SESSION_SECRET` | Yes | — | Long random string for session signing |
-| `POSTGRES_PASSWORD` | Yes | — | PostgreSQL password |
-| `ADMIN_USERNAME` | No | `admin` | First admin account username |
-| `ADMIN_PASSWORD` | Yes | — | First admin account password |
-| `ENCRYPTION_KEY` | Recommended | derived | 32-byte hex; AES-256-GCM key for credentials |
-| `AI_INTEGRATIONS_OPENAI_API_KEY` | One required* | — | OpenAI API key |
-| `AI_INTEGRATIONS_ANTHROPIC_API_KEY` | One required* | — | Anthropic API key |
-| `AI_INTEGRATIONS_GEMINI_API_KEY` | One required* | — | Gemini API key |
-| `DOCKER_SOCKET` | No | — | Path to Docker socket; enables container execution |
-| `AGENT_IMAGE` | No | `nanoorch-agent:latest` | Docker image for action task agent |
-| `SANDBOX_IMAGE` | No | `nanoorch-sandbox:latest` | Docker image for code execution sandbox |
-| `SANDBOX_RUNTIME` | No | `runsc` | Docker runtime for sandbox (`runsc` = gVisor, `runc` = standard Docker) |
-| `APP_PORT` | No | `3000` | Host port to expose |
+Every secret variable below also accepts a companion `<NAME>_FILE` variant. When the `_FILE` variable is set, the app reads the value from that file path instead of the plain env var — keeping real secrets out of `docker inspect` output. See the [Security Hardening](#security-hardening) section for full details.
+
+| Variable | `_FILE` supported | Required | Default | Description |
+|----------|:-----------------:|----------|---------|-------------|
+| `DATABASE_URL` | ✓ | Yes | — | PostgreSQL connection string |
+| `SESSION_SECRET` | ✓ | Yes | — | Long random string for session signing |
+| `POSTGRES_PASSWORD` | — | Yes | — | PostgreSQL password (used in docker-compose only) |
+| `ADMIN_USERNAME` | — | No | `admin` | First admin account username |
+| `ADMIN_PASSWORD` | ✓ | Yes | — | First admin account password (first-boot seed only) |
+| `ENCRYPTION_KEY` | ✓ | Recommended | derived | 32-byte hex; AES-256-GCM key for credentials |
+| `AI_INTEGRATIONS_OPENAI_API_KEY` | ✓ | One required* | — | OpenAI API key |
+| `AI_INTEGRATIONS_ANTHROPIC_API_KEY` | ✓ | One required* | — | Anthropic API key |
+| `AI_INTEGRATIONS_GEMINI_API_KEY` | ✓ | One required* | — | Gemini API key |
+| `DOCKER_SOCKET` | — | No | — | Path to Docker socket; enables container execution |
+| `AGENT_IMAGE` | — | No | `nanoorch-agent:latest` | Docker image for action task agent |
+| `SANDBOX_IMAGE` | — | No | `nanoorch-sandbox:latest` | Docker image for code execution sandbox |
+| `SANDBOX_RUNTIME` | — | No | `runsc` | OCI runtime for **code-execution sandbox** containers (`runsc` = gVisor, `runc` = standard Docker) |
+| `AGENT_RUNTIME` | — | No | `runc` | OCI runtime for **agent action-task** containers (`runsc` = gVisor, blank = Docker default) |
+| `SECCOMP_PROFILE` | — | No | — | Absolute host path to a custom seccomp JSON profile; applied to both agent and sandbox containers. A hardened profile is included at `agent/seccomp/nanoorch.json` |
+| `COOKIE_SECURE` | — | No | `false` | Set `true` when behind an HTTPS reverse proxy (nginx/ALB); leave `false` for plain HTTP |
+| `APP_PORT` | — | No | `3000` | Host port to expose |
 
 ---
 
@@ -528,10 +667,12 @@ docker build -t nanoorch-sandbox:latest ./agent/sandbox
 
 | Variable | Default | Description |
 |---|---|---|
-| `SANDBOX_IMAGE` | `nanoorch-sandbox:latest` | Image to use for code runs |
-| `SANDBOX_RUNTIME` | `runsc` | Docker runtime — `runsc` for gVisor, `runc` for plain Docker |
+| `SANDBOX_IMAGE` | `nanoorch-sandbox:latest` | Image to use for code-execution sandbox containers |
+| `SANDBOX_RUNTIME` | `runsc` | OCI runtime for sandbox containers — `runsc` for gVisor, `runc` for standard Docker |
+| `AGENT_RUNTIME` | _(blank)_ | OCI runtime for agent action-task containers — `runsc` to enable gVisor for those too |
+| `SECCOMP_PROFILE` | _(blank)_ | Absolute host path to a custom seccomp JSON profile (applied to both agent and sandbox containers). A hardened profile is at `agent/seccomp/nanoorch.json` |
 
-Set `SANDBOX_RUNTIME=runc` if gVisor is not installed. Code execution still works — you just lose the extra kernel-level isolation.
+Set `SANDBOX_RUNTIME=runc` if gVisor is not installed. Code execution still works — you just lose the extra kernel-level isolation. Set `AGENT_RUNTIME=runsc` to apply gVisor to action-task agent containers as well.
 
 ---
 

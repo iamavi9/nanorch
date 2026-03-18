@@ -22,6 +22,7 @@ A step-by-step walkthrough for setting up workspaces, agents, integrations, appr
 14. [Adding members and workspace admins](#14-adding-members-and-workspace-admins)
 15. [Workspace resource limits](#15-workspace-resource-limits)
 16. [Member experience](#16-member-experience)
+17. [Secure deployment — Docker secrets](#17-secure-deployment--docker-secrets)
 
 ---
 
@@ -360,10 +361,11 @@ Create cron jobs that automatically run agent tasks on a repeating schedule.
      | Preset | Expression |
      |---|---|
      | Every minute | `* * * * *` |
+     | Every 5 minutes | `*/5 * * * *` |
+     | Every 15 minutes | `*/15 * * * *` |
      | Every hour | `0 * * * *` |
      | Every day at midnight | `0 0 * * *` |
      | Every Monday at 9am | `0 9 * * 1` |
-     | Every 15 minutes | `*/15 * * * *` |
    - **Timezone** — IANA timezone (e.g. `America/New_York`, `Europe/London`, `UTC`)
    - **Orchestrator** — which orchestrator runs the task
    - **Prompt** — the task content sent to the agent
@@ -478,10 +480,20 @@ The **Observability** page (workspace sidebar) gives a full picture of AI token 
 
 ### What it shows
 
+Four summary cards at the top give an at-a-glance view:
+
+| Card | What it shows |
+|---|---|
+| **Total Tokens** | Combined input + output tokens for the selected period, with in/out split shown below |
+| **Est. Cost** | Estimated USD cost for the selected period based on per-token pricing |
+| **Agent Calls** | Number of token-usage records (proxy for task invocations) |
+| **Active Agents** | Number of distinct agents with at least one token record |
+
+Below the cards:
+
 | Section | Contents |
 |---|---|
-| **Summary** | Total tokens (in + out), total estimated cost, breakdown for the current billing period |
-| **Daily usage chart** | Bar chart of token consumption per day over the last 30 days |
+| **Daily Token Usage** | Line chart of input and output token consumption per day over the selected window |
 | **Per-agent breakdown** | Table of agents ranked by total tokens consumed |
 | **Provider/model summary** | Cost breakdown by AI provider and model (OpenAI, Anthropic, Gemini, Ollama) |
 
@@ -581,6 +593,67 @@ http://<your-host>:3000/chat/<workspace-slug>
 
 ---
 
+## 17. Secure deployment — Docker secrets
+
+By default, secrets (`SESSION_SECRET`, `ADMIN_PASSWORD`, AI provider keys, etc.) are passed as plain environment variables in `.env` — visible in `docker inspect Env`. For production environments, use Docker secrets to keep real values out of `docker inspect` output entirely.
+
+### How the `_FILE` pattern works
+
+Every secret variable in NanoOrch supports a companion `<NAME>_FILE` variant. When `SESSION_SECRET_FILE=/run/secrets/session_secret` is set, the app reads the value from that file instead of the `SESSION_SECRET` env var. Docker mounts the secret file read-only inside the container at `/run/secrets/<name>` — `docker inspect` shows only the path, never the real value.
+
+### Quick setup
+
+**Step 1 — Run the setup script:**
+
+```bash
+chmod +x secrets/create-secrets.sh
+./secrets/create-secrets.sh
+```
+
+This prompts for passwords, generates cryptographically random values for `session_secret` and `encryption_key`, and creates all required `secrets/*.txt` files. File permissions are set to `0400` automatically.
+
+**Step 2 — Start using the secrets compose file:**
+
+```bash
+docker compose -f docker-compose.secrets.yml up -d
+```
+
+**Step 3 — Verify** (`docker inspect` should show paths, not real values):
+
+```bash
+docker inspect nanoorch-app | grep -A 20 '"Env"'
+# Should show SESSION_SECRET_FILE=/run/secrets/session_secret
+# NOT your actual session secret value
+```
+
+### Supported `_FILE` variables
+
+| Variable | Secret file |
+|---|---|
+| `DATABASE_URL_FILE` | `secrets/database_url.txt` |
+| `SESSION_SECRET_FILE` | `secrets/session_secret.txt` |
+| `ADMIN_PASSWORD_FILE` | `secrets/admin_password.txt` |
+| `ENCRYPTION_KEY_FILE` | `secrets/encryption_key.txt` |
+| `AI_INTEGRATIONS_OPENAI_API_KEY_FILE` | `secrets/openai_api_key.txt` |
+| `AI_INTEGRATIONS_ANTHROPIC_API_KEY_FILE` | `secrets/anthropic_api_key.txt` |
+| `AI_INTEGRATIONS_GEMINI_API_KEY_FILE` | `secrets/gemini_api_key.txt` |
+
+### Combining with gVisor + seccomp
+
+For a fully hardened deployment, add these to `.env` (when using `docker-compose.yml`) or as env vars in `docker-compose.secrets.yml`:
+
+```env
+SANDBOX_RUNTIME=runsc            # gVisor for code-execution sandbox containers
+AGENT_RUNTIME=runsc              # gVisor for agent action-task containers
+SECCOMP_PROFILE=/etc/nanoorch/seccomp/nanoorch.json
+```
+
+A hardened seccomp profile is included at `agent/seccomp/nanoorch.json`. Copy it to a stable host path before setting `SECCOMP_PROFILE`.
+
+See [`secrets/README.md`](./secrets/README.md) and the [Security Hardening](./README.md#security-hardening) section of the README for full details on all three security layers.
+
+---
+
 ## Quick-start checklist
 
 - [ ] Log in as global admin
@@ -600,3 +673,5 @@ http://<your-host>:3000/chat/<workspace-slug>
 - [ ] Check Observability to see token usage and costs
 - [ ] (Optional) Set up a scheduled job with an outbound Teams or Slack channel
 - [ ] (Optional) Create member and workspace admin accounts and share the chat link
+- [ ] **Production:** Switch to Docker secrets — run `./secrets/create-secrets.sh` and use `docker-compose.secrets.yml`
+- [ ] **Production:** Enable `SANDBOX_RUNTIME=runsc`, `AGENT_RUNTIME=runsc`, and `SECCOMP_PROFILE` for full container hardening

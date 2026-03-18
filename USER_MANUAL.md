@@ -117,17 +117,26 @@ If your request involves fetching live data or performing an operation — such 
 
 ## 6. Approving actions
 
-When the agent detects that your request involves a **write operation** (creating, modifying, or deleting something in a cloud service or developer tool), it may pause and show you a confirmation card before doing anything:
+When the agent detects that your request involves a **cloud or developer-tool action**, it may pause and show you a confirmation card before doing anything:
 
-> **Pending action**
-> Create GitHub issue: "Login timeout on mobile" in repo my-org/backend
+> **poc-agent** wants to run a cloud action
 >
-> [ Approve ]   [ Cancel ]
+> **List all S3 buckets in the AWS account.**
+>
+> PREDICTED OPERATIONS
+> ✅ read-only   This call lists all S3 buckets in the AWS account.
+>               `aws_list_s3_buckets`
+>
+> ⓘ This will execute in an isolated environment using your cloud credentials.
+>
+> [ ✅ Approve & Run ]   [ ✖ Cancel ]
 
-- **Approve** — the action runs. You will see a progress indicator and a completion message when it finishes.
+- **Approve & Run** — the action runs immediately in an isolated environment. You will see the result in the chat when it finishes.
 - **Cancel** — nothing happens. You can rephrase or ask something different.
 
-> Review the description carefully before approving. Actions that create issues, modify resources, or trigger pipelines have real effects.
+The card shows a **Predicted Operations** panel that tells you exactly which tool call will be made and whether it is **read-only** (safe to approve freely) or a **write** operation (creates, modifies, or deletes something). Read the description carefully before approving write operations.
+
+> Review the description carefully before approving write operations. Actions that create issues, modify resources, or trigger pipelines have real effects.
 
 If you are a **workspace admin**, pending approvals also appear in the **Approvals** section of the sidebar with a badge showing how many are waiting. You can review and resolve them there at any time.
 
@@ -147,7 +156,7 @@ You do not need to do anything special. Just ask naturally:
 | `@agent what is the SHA-256 hash of "hello world"?` | Runs a hash function, returns the output |
 | `@agent count how many items have status "active": [{"status":"active"},...]` | Parses the data, counts and returns the number |
 
-The sandbox can run Python and JavaScript. It cannot browse the internet, access your files, or remember anything from a previous run.
+The sandbox can run **Python** and **Node.js (JavaScript)**. It cannot browse the internet, access your files, or remember anything from a previous run.
 
 ---
 
@@ -206,7 +215,15 @@ Your administrator may have set up two types of automated workflows that run wit
 
 ### Scheduled agents
 
-A scheduled agent runs automatically on a timed schedule — for example, every Monday morning an agent might fetch all open P1 Jira issues and send a digest, or every hour an agent might check for CloudWatch errors.
+A scheduled agent runs automatically on a timed schedule — for example, every Monday morning an agent might fetch all open P1 Jira issues and send a digest, or every 5 minutes an agent might check for Jira updates.
+
+Each job card shows:
+- **Active / Paused** badge — whether the job is currently enabled
+- The cron expression and timezone (e.g. `*/5 * * * *` · Asia/Kolkata)
+- **Next run** and **Last run** timestamps
+- A **Last task** link to jump directly to the most recent task log
+
+Your administrator can pause, resume, manually trigger (Run Now), edit, or delete any scheduled job without losing its configuration.
 
 When a scheduled agent completes its task, the result may be automatically sent to a Slack or Teams channel. You may receive these as regular messages in your team channel without having to do anything in NanoOrch.
 
@@ -227,13 +244,17 @@ When relevant documents are found, a collapsible **Sources** panel appears below
 ```
 [agent reply text here...]
 
-▶ Sources  (3 chunks found)
-  • Company Policy v2.pdf — page 4
-  • Onboarding Guide — section 3.2
-  • Q3 Handbook — page 11
+📄 26 sources  ▾
+  • Leave-and-Holiday-Policy.pdf
+    HR India - Leave and Holiday Policy (PIL) Purpose The purpose of this Policy
+    is to facilitate effective administration and management of employees' leav...
+  • Project-Manual-Template.pdf
+    9.INTERPRETATIONOFDOCUMENTSANDADDENDA A.Before the Owner makes the award...
+  • fgs_033000.pdf
+    Whole Building Design Guide Federal Green Construction Guide for Specifiers...
 ```
 
-Click **Sources** to expand and read the specific document excerpts the agent used to form its answer. This lets you verify the information and find the original document if you need more detail.
+Click the **Sources** badge to expand and read the specific document excerpts the agent used to form its answer. The badge shows the total number of source chunks retrieved (for example, "26 sources"). This lets you verify the information and navigate to the original document if you need more detail.
 
 ---
 
@@ -293,6 +314,10 @@ More specific:   @jira-bot show all open P1 and P2 bugs in project CORE assigned
 **The agent paused and is waiting for approval**
 
 - The agent has detected a write operation and is waiting for a workspace admin to approve it. If you are a workspace admin, go to the **Approvals** section in the sidebar. Otherwise, let your administrator know there is a pending approval.
+
+**"Invalid or expired task token" error appears in task logs**
+
+- This is an internal security mechanism — the short-lived token used to authorise the agent's AI calls has expired. This typically means the task ran for longer than 15 minutes. Your administrator can review the task logs for details. Submitting the task again will issue a fresh token.
 
 **The agent says it cannot find an issue / repo / project**
 

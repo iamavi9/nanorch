@@ -3,16 +3,28 @@ version: "3.9"
 # ─────────────────────────────────────────────────────────────
 #  NanoOrch — Docker Compose (EC2 / self-hosted)
 #
-#  Quick start:
+#  Quick start (plain .env — secrets visible in `docker inspect`):
 #    cp .env.example .env                              # fill in passwords + API keys
 #    docker build -t nanoorch-agent:latest ./agent     # action-task runner
 #    docker build -t nanoorch-sandbox:latest ./agent/sandbox  # code execution sandbox
 #    docker compose up -d
 #    open http://<your-ip>:3000
 #
+#  Hardened start (Docker secrets — values never appear in `docker inspect`):
+#    ./secrets/create-secrets.sh                       # interactive secret-file setup
+#    docker compose -f docker-compose.secrets.yml up -d
+#    See secrets/README.md for details.
+#
 #  Sandbox runtimes:
 #    SANDBOX_RUNTIME=runsc  (default) requires gVisor installed on the host
 #    SANDBOX_RUNTIME=runc   uses standard Docker (no gVisor needed)
+#
+#  gVisor for agent task containers (separate from code sandbox):
+#    Set AGENT_RUNTIME=runsc in .env to isolate agent containers via gVisor.
+#
+#  Custom seccomp profile:
+#    Set SECCOMP_PROFILE=/host/path/to/nanoorch.json in .env.
+#    A hardened profile is provided at agent/seccomp/nanoorch.json.
 # ─────────────────────────────────────────────────────────────
 
 services:
@@ -76,8 +88,18 @@ services:
       DOCKER_SOCKET:    /var/run/docker.sock
       AGENT_IMAGE:      ${AGENT_IMAGE:-nanoorch-agent:latest}
       SANDBOX_IMAGE:    ${SANDBOX_IMAGE:-nanoorch-sandbox:latest}
-      # Set SANDBOX_RUNTIME=runc if gVisor (runsc) is not installed on the host
+      # SANDBOX_RUNTIME controls the runtime for code-execution sandbox containers.
+      # Set to runc if gVisor (runsc) is not installed on the host.
       SANDBOX_RUNTIME:  ${SANDBOX_RUNTIME:-runsc}
+      # AGENT_RUNTIME controls the runtime for agent action-task containers.
+      # Set to runsc to enable gVisor isolation for agent containers too.
+      # Leave blank to use the default Docker runtime (runc).
+      AGENT_RUNTIME:    ${AGENT_RUNTIME:-}
+      # SECCOMP_PROFILE: absolute host path to a custom seccomp JSON profile.
+      # Applied to both agent and sandbox containers when set.
+      # Example: SECCOMP_PROFILE=/etc/nanoorch/seccomp/nanoorch.json
+      # A hardened profile is included at agent/seccomp/nanoorch.json.
+      SECCOMP_PROFILE:  ${SECCOMP_PROFILE:-}
 
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

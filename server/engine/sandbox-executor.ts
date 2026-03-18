@@ -55,6 +55,18 @@ export async function executeCodeInSandbox(
     "--cpus", "0.5",
     "--pids-limit", "64",
     "--tmpfs", "/tmp:size=64m",
+    // Drop every Linux capability — the sandbox runs unprivileged code and
+    // needs none of them.  Paired with --read-only + no network this is the
+    // first line of defence before gVisor / runsc even gets involved.
+    "--cap-drop", "ALL",
+    // Prevent any process inside from gaining new privileges via setuid
+    // binaries or filesystem capabilities.
+    "--security-opt", "no-new-privileges",
+    // If the operator has supplied a host-path to a seccomp profile, apply it.
+    // Example: SECCOMP_PROFILE=/etc/nanoorch/seccomp/nanoorch.json
+    ...(process.env.SECCOMP_PROFILE
+      ? ["--security-opt", `seccomp=${process.env.SECCOMP_PROFILE}`]
+      : []),
     "-e", `LANGUAGE=${language}`,
     "-e", `CODE_B64=${codeB64}`,
     "-e", `TIMEOUT_SECONDS=${innerTimeoutSeconds}`,
