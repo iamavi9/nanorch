@@ -209,8 +209,11 @@ export default function ChatPage({ workspaceId }: Props) {
   }, [displayMessages]);
 
   const createConvMutation = useMutation({
-    mutationFn: () => apiRequest("POST", `/api/workspaces/${workspaceId}/conversations`, { title: "New Chat" }),
-    onSuccess: (conv: any) => {
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/workspaces/${workspaceId}/conversations`, { title: "New Chat" });
+      return res.json() as Promise<{ id: string; title: string }>;
+    },
+    onSuccess: (conv) => {
       qc.invalidateQueries({ queryKey: [`/api/workspaces/${workspaceId}/conversations`] });
       setActiveConvId(conv.id);
       setDisplayMessages([]);

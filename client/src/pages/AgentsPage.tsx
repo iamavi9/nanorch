@@ -269,10 +269,13 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
   });
 
   const fireHeartbeatMutation = useMutation({
-    mutationFn: (id: string) => apiRequest("POST", `/api/agents/${id}/heartbeat/fire`),
-    onSuccess: async (res: any) => {
+    mutationFn: async (id: string) => {
+      const res = await apiRequest("POST", `/api/agents/${id}/heartbeat/fire`);
+      return res.json() as Promise<{ taskId: string; message: string }>;
+    },
+    onSuccess: async (data) => {
       await queryClient.invalidateQueries({ queryKey: [`/api/orchestrators/${orchestratorId}/agents`] });
-      toast({ title: "Heartbeat fired", description: `Task ${res.taskId} created` });
+      toast({ title: "Heartbeat fired", description: `Task ${data.taskId} created` });
     },
     onError: (err: any) => toast({ title: "Error", description: err.message, variant: "destructive" }),
   });
