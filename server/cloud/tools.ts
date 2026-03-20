@@ -593,6 +593,7 @@ export const SPAWN_AGENT_TOOL: ToolDefinition = {
 export function getToolByName(name: string): ToolDefinition | undefined {
   if (name === "code_interpreter") return CODE_INTERPRETER_TOOL;
   if (name === "request_approval") return REQUEST_APPROVAL_TOOL;
+  if (name === "spawn_agent") return SPAWN_AGENT_TOOL;
   return [...AWS_TOOLS, ...GCP_TOOLS, ...AZURE_TOOLS, ...RAGFLOW_TOOLS, ...JIRA_TOOLS, ...GITHUB_TOOLS, ...GITLAB_TOOLS, ...TEAMS_TOOLS].find((t) => t.name === name);
 }
 

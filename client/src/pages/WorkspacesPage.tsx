@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { APP_NAME, APP_TAGLINE } from "@/lib/config";
-import { Plus, Network, Zap, Trash2, Moon, Sun, Settings2, ShieldAlert, Pencil, MessageSquare } from "lucide-react";
+import { Plus, Network, Zap, Trash2, Moon, Sun, Settings2, ShieldAlert, Pencil, MessageSquare, KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -290,10 +290,18 @@ export default function WorkspacesPage() {
             </p>
           </div>
           {isGlobalAdmin && (
-            <Button onClick={() => setOpen(true)} data-testid="button-create-workspace">
-              <Plus className="w-4 h-4 mr-2" />
-              New Workspace
-            </Button>
+            <div className="flex items-center gap-2">
+              <Link href="/admin/sso">
+                <Button variant="outline" data-testid="link-sso-settings">
+                  <KeyRound className="w-4 h-4 mr-2" />
+                  SSO Settings
+                </Button>
+              </Link>
+              <Button onClick={() => setOpen(true)} data-testid="button-create-workspace">
+                <Plus className="w-4 h-4 mr-2" />
+                New Workspace
+              </Button>
+            </div>
           )}
         </div>
 

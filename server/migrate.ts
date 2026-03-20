@@ -209,6 +209,91 @@ const INCREMENTAL_MIGRATIONS: Array<{ name: string; sql: string }> = [
       "last_activity_at" timestamp DEFAULT now()
     )`,
   },
+  {
+    name: "add_orchestrators_failover",
+    sql: `ALTER TABLE "orchestrators" ADD COLUMN IF NOT EXISTS "failover_provider" text;
+          ALTER TABLE "orchestrators" ADD COLUMN IF NOT EXISTS "failover_model" text`,
+  },
+  {
+    name: "add_tasks_bypass_retry",
+    sql: `ALTER TABLE "tasks" ADD COLUMN IF NOT EXISTS "bypass_approval" boolean DEFAULT false;
+          ALTER TABLE "tasks" ADD COLUMN IF NOT EXISTS "retry_count" integer DEFAULT 0`,
+  },
+  {
+    name: "add_comms_threads_history",
+    sql: `ALTER TABLE "comms_threads" ADD COLUMN IF NOT EXISTS "history" jsonb DEFAULT '[]'`,
+  },
+  {
+    name: "create_sso_providers",
+    sql: `CREATE TABLE IF NOT EXISTS "sso_providers" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "name" text NOT NULL,
+      "type" text NOT NULL,
+      "is_active" boolean DEFAULT true,
+      "config" jsonb DEFAULT '{}',
+      "default_role" text DEFAULT 'member',
+      "created_at" timestamp DEFAULT now()
+    )`,
+  },
+  {
+    name: "create_event_triggers",
+    sql: `CREATE TABLE IF NOT EXISTS "event_triggers" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "workspace_id" varchar NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      "orchestrator_id" varchar NOT NULL REFERENCES orchestrators(id) ON DELETE CASCADE,
+      "agent_id" varchar NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      "name" text NOT NULL,
+      "source" text NOT NULL,
+      "event_types" text[] DEFAULT '{}',
+      "prompt_template" text NOT NULL,
+      "secret_token" text,
+      "filter_config" jsonb DEFAULT '{}',
+      "is_active" boolean DEFAULT true,
+      "created_at" timestamp DEFAULT now()
+    )`,
+  },
+  {
+    name: "create_trigger_events",
+    sql: `CREATE TABLE IF NOT EXISTS "trigger_events" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "trigger_id" varchar NOT NULL REFERENCES event_triggers(id) ON DELETE CASCADE,
+      "source" text NOT NULL,
+      "event_type" text NOT NULL,
+      "payload_preview" text,
+      "matched" boolean DEFAULT false,
+      "task_id" varchar,
+      "error" text,
+      "received_at" timestamp DEFAULT now()
+    )`,
+  },
+  {
+    name: "add_agents_heartbeat_fields",
+    sql: `ALTER TABLE "agents"
+      ADD COLUMN IF NOT EXISTS "heartbeat_enabled" boolean DEFAULT false,
+      ADD COLUMN IF NOT EXISTS "heartbeat_interval_minutes" integer DEFAULT 30,
+      ADD COLUMN IF NOT EXISTS "heartbeat_checklist" text,
+      ADD COLUMN IF NOT EXISTS "heartbeat_target" text DEFAULT 'none',
+      ADD COLUMN IF NOT EXISTS "heartbeat_model" text,
+      ADD COLUMN IF NOT EXISTS "heartbeat_silence_phrase" text DEFAULT 'HEARTBEAT_OK',
+      ADD COLUMN IF NOT EXISTS "heartbeat_last_fired_at" timestamp`,
+  },
+  {
+    name: "add_tasks_is_heartbeat",
+    sql: `ALTER TABLE "tasks" ADD COLUMN IF NOT EXISTS "is_heartbeat" boolean DEFAULT false`,
+  },
+  {
+    name: "add_notify_channel_delivery",
+    sql: `ALTER TABLE "tasks" ADD COLUMN IF NOT EXISTS "notify_channel_id" varchar;
+          ALTER TABLE "scheduled_jobs" ADD COLUMN IF NOT EXISTS "notify_channel_id" varchar;
+          ALTER TABLE "pipelines" ADD COLUMN IF NOT EXISTS "notify_channel_id" varchar;
+          ALTER TABLE "event_triggers" ADD COLUMN IF NOT EXISTS "notify_channel_id" varchar;
+          ALTER TABLE "agents" ADD COLUMN IF NOT EXISTS "heartbeat_notify_channel_id" varchar`,
+  },
+  {
+    name: "add_workspace_config_utilization_alert",
+    sql: `ALTER TABLE "workspace_config" ADD COLUMN IF NOT EXISTS "utilization_alert_threshold_tokens" integer;
+          ALTER TABLE "workspace_config" ADD COLUMN IF NOT EXISTS "utilization_alert_channel_id" varchar`,
+  },
 ];
 
 const IDEMPOTENT_ERROR_CODES = new Set([

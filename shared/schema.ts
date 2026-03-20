@@ -51,6 +51,8 @@ export const orchestrators = pgTable("orchestrators", {
   maxRetries: integer("max_retries").default(2),
   timeoutSeconds: integer("timeout_seconds").default(120),
   status: orchestratorStatusEnum("status").default("active"),
+  failoverProvider: text("failover_provider"),
+  failoverModel: text("failover_model"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -65,6 +67,14 @@ export const agents = pgTable("agents", {
   maxTokens: integer("max_tokens").default(4096),
   temperature: integer("temperature").default(70),
   sandboxTimeoutSeconds: integer("sandbox_timeout_seconds"),
+  heartbeatEnabled: boolean("heartbeat_enabled").default(false),
+  heartbeatIntervalMinutes: integer("heartbeat_interval_minutes").default(30),
+  heartbeatChecklist: text("heartbeat_checklist"),
+  heartbeatTarget: text("heartbeat_target").default("none"),
+  heartbeatModel: text("heartbeat_model"),
+  heartbeatSilencePhrase: text("heartbeat_silence_phrase").default("HEARTBEAT_OK"),
+  heartbeatLastFiredAt: timestamp("heartbeat_last_fired_at"),
+  heartbeatNotifyChannelId: varchar("heartbeat_notify_channel_id"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -101,7 +111,11 @@ export const tasks = pgTable("tasks", {
   intent: varchar("intent"),
   parentTaskId: varchar("parent_task_id"),
   commsThreadId: varchar("comms_thread_id"),
+  bypassApproval: boolean("bypass_approval").default(false),
+  retryCount: integer("retry_count").default(0),
   errorMessage: text("error_message"),
+  isHeartbeat: boolean("is_heartbeat").default(false),
+  notifyChannelId: varchar("notify_channel_id"),
   createdAt: timestamp("created_at").defaultNow(),
   startedAt: timestamp("started_at"),
   completedAt: timestamp("completed_at"),
@@ -167,6 +181,7 @@ export const scheduledJobs = pgTable("scheduled_jobs", {
   cronExpression: varchar("cron_expression").notNull(),
   timezone: varchar("timezone").default("UTC"),
   isActive: boolean("is_active").default(true),
+  notifyChannelId: varchar("notify_channel_id"),
   lastRunAt: timestamp("last_run_at"),
   nextRunAt: timestamp("next_run_at"),
   lastTaskId: varchar("last_task_id"),
@@ -238,6 +253,7 @@ export const pipelines = pgTable("pipelines", {
   isActive: boolean("is_active").default(true),
   cronExpression: varchar("cron_expression"),
   timezone: varchar("timezone").default("UTC"),
+  notifyChannelId: varchar("notify_channel_id"),
   lastRunAt: timestamp("last_run_at"),
   nextRunAt: timestamp("next_run_at"),
   createdAt: timestamp("created_at").defaultNow(),
@@ -322,6 +338,8 @@ export const workspaceConfig = pgTable("workspace_config", {
   allowedAiProviders: text("allowed_ai_providers").array(),
   allowedCloudProviders: text("allowed_cloud_providers").array(),
   allowedChannelTypes: text("allowed_channel_types").array(),
+  utilizationAlertThresholdTokens: integer("utilization_alert_threshold_tokens"),
+  utilizationAlertChannelId: varchar("utilization_alert_channel_id"),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
@@ -339,6 +357,7 @@ export const commsThreads = pgTable("comms_threads", {
   agentId: varchar("agent_id").references(() => agents.id, { onDelete: "set null" }),
   platform: text("platform").notNull(),
   conversationRef: jsonb("conversation_ref").default({}),
+  history: jsonb("history").$type<Array<{ role: string; content: string }>>().default([]),
   createdAt: timestamp("created_at").defaultNow(),
   lastActivityAt: timestamp("last_activity_at").defaultNow(),
 });
@@ -346,3 +365,54 @@ export const commsThreads = pgTable("comms_threads", {
 export const insertCommsThreadSchema = createInsertSchema(commsThreads).omit({ id: true, createdAt: true });
 export type CommsThread = typeof commsThreads.$inferSelect;
 export type InsertCommsThread = z.infer<typeof insertCommsThreadSchema>;
+
+// ── SSO Providers (global, not workspace-scoped) ──────────────────────────────
+export const ssoProviders = pgTable("sso_providers", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull(),
+  type: text("type").notNull(), // 'oidc' | 'saml'
+  isActive: boolean("is_active").default(true),
+  config: jsonb("config").default({}),
+  defaultRole: text("default_role").default("member"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertSsoProviderSchema = createInsertSchema(ssoProviders).omit({ id: true, createdAt: true });
+export type SsoProvider = typeof ssoProviders.$inferSelect;
+export type InsertSsoProvider = z.infer<typeof insertSsoProviderSchema>;
+
+// ── Event Triggers (per-workspace) ───────────────────────────────────────────
+export const eventTriggers = pgTable("event_triggers", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  orchestratorId: varchar("orchestrator_id").notNull().references(() => orchestrators.id, { onDelete: "cascade" }),
+  agentId: varchar("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  source: text("source").notNull(), // 'github' | 'gitlab' | 'jira'
+  eventTypes: text("event_types").array().default([]),
+  promptTemplate: text("prompt_template").notNull(),
+  secretToken: text("secret_token"),
+  filterConfig: jsonb("filter_config").default({}),
+  isActive: boolean("is_active").default(true),
+  notifyChannelId: varchar("notify_channel_id"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertEventTriggerSchema = createInsertSchema(eventTriggers).omit({ id: true, createdAt: true });
+export type EventTrigger = typeof eventTriggers.$inferSelect;
+export type InsertEventTrigger = z.infer<typeof insertEventTriggerSchema>;
+
+// ── Trigger Events (webhook delivery history) ─────────────────────────────────
+export const triggerEvents = pgTable("trigger_events", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  triggerId: varchar("trigger_id").notNull().references(() => eventTriggers.id, { onDelete: "cascade" }),
+  source: text("source").notNull(),
+  eventType: text("event_type").notNull(),
+  payloadPreview: text("payload_preview"),
+  matched: boolean("matched").default(false),
+  taskId: varchar("task_id"),
+  error: text("error"),
+  receivedAt: timestamp("received_at").defaultNow(),
+});
+
+export type TriggerEvent = typeof triggerEvents.$inferSelect;

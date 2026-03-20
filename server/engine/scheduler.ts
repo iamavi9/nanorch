@@ -40,6 +40,7 @@ async function fireJob(jobId: string) {
       status: "pending",
       intent: "conversational",
       priority: 5,
+      notifyChannelId: (job as any).notifyChannelId ?? undefined,
     });
 
     const nextRunAt = computeNextRun(job.cronExpression, job.timezone ?? "UTC");

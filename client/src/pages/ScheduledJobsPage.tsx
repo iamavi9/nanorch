@@ -70,17 +70,20 @@ const EMPTY_FORM = {
   prompt: "",
   cronExpression: "0 9 * * *",
   timezone: "UTC",
+  notifyChannelId: "",
 };
 
 function JobForm({
   initial,
   agents,
+  channels,
   onSave,
   isPending,
   onCancel,
 }: {
   initial: typeof EMPTY_FORM;
   agents: AgentWithOrch[];
+  channels: { id: string; name: string; type: string }[];
   onSave: (data: typeof EMPTY_FORM) => void;
   isPending: boolean;
   onCancel: () => void;
@@ -178,6 +181,25 @@ function JobForm({
         </Select>
       </div>
 
+      <div className="space-y-2">
+        <Label>Notify Channel (optional)</Label>
+        <Select
+          value={form.notifyChannelId || "none"}
+          onValueChange={(v) => setForm({ ...form, notifyChannelId: v === "none" ? "" : v })}
+        >
+          <SelectTrigger data-testid="select-notify-channel">
+            <SelectValue placeholder="None — use orchestrator default" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="none">None — use orchestrator default</SelectItem>
+            {channels.map((ch) => (
+              <SelectItem key={ch.id} value={ch.id}>{ch.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">Channel to notify when this job completes or fails.</p>
+      </div>
+
       <div className="flex justify-end gap-2 pt-1">
         <Button variant="outline" onClick={onCancel}>Cancel</Button>
         <Button data-testid="button-save-job" onClick={() => onSave(form)} disabled={isPending}>
@@ -201,6 +223,11 @@ export default function ScheduledJobsPage({ workspaceId }: Props) {
   const { data: agents = [] } = useQuery<AgentWithOrch[]>({
     queryKey: [`/api/workspaces/${workspaceId}/agents`],
   });
+
+  const { data: allChannels = [] } = useQuery<{ id: string; name: string; type: string }[]>({
+    queryKey: [`/api/workspaces/${workspaceId}/channels`],
+  });
+  const outboundChannels = allChannels.filter((c) => ["slack", "teams", "google_chat", "generic_webhook"].includes(c.type));
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: [`/api/workspaces/${workspaceId}/scheduled-jobs`] });
 
@@ -275,6 +302,7 @@ export default function ScheduledJobsPage({ workspaceId }: Props) {
           <JobForm
             initial={EMPTY_FORM}
             agents={agents}
+            channels={outboundChannels}
             onSave={handleCreate}
             isPending={createMutation.isPending}
             onCancel={() => setCreateOpen(false)}
@@ -295,8 +323,10 @@ export default function ScheduledJobsPage({ workspaceId }: Props) {
                 prompt: editingJob.prompt,
                 cronExpression: editingJob.cronExpression,
                 timezone: editingJob.timezone ?? "UTC",
+                notifyChannelId: (editingJob as any).notifyChannelId ?? "",
               }}
               agents={agents}
+              channels={outboundChannels}
               onSave={handleEdit}
               isPending={editMutation.isPending}
               onCancel={() => setEditingJob(null)}

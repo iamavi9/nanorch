@@ -1,5 +1,6 @@
 import { storage } from "../storage";
 import { executeTask } from "./executor";
+import { dispatchToChannel } from "./notifier";
 
 export async function executePipeline(pipelineRunId: string): Promise<void> {
   const run = await storage.getPipelineRun(pipelineRunId);
@@ -84,11 +85,27 @@ export async function executePipeline(pipelineRunId: string): Promise<void> {
       completedAt: new Date(),
     });
     await storage.updatePipeline(pipeline.id, { lastRunAt: new Date() }).catch(console.error);
+
+    if ((pipeline as any).notifyChannelId) {
+      dispatchToChannel(
+        (pipeline as any).notifyChannelId,
+        `✅ Pipeline Completed — ${pipeline.name}`,
+        `Pipeline "${pipeline.name}" finished successfully.`,
+      ).catch(console.error);
+    }
   } catch (err: any) {
     await storage.updatePipelineRun(pipelineRunId, {
       status: "failed",
       error: err.message,
       completedAt: new Date(),
     });
+
+    if ((pipeline as any).notifyChannelId) {
+      dispatchToChannel(
+        (pipeline as any).notifyChannelId,
+        `❌ Pipeline Failed — ${pipeline.name}`,
+        `Pipeline "${pipeline.name}" failed: ${err.message}`,
+      ).catch(console.error);
+    }
   }
 }

@@ -23,6 +23,8 @@ A step-by-step walkthrough for setting up workspaces, agents, integrations, appr
 15. [Workspace resource limits](#15-workspace-resource-limits)
 16. [Member experience](#16-member-experience)
 17. [Secure deployment — Docker secrets](#17-secure-deployment--docker-secrets)
+18. [SSO — OIDC and SAML 2.0](#18-sso--oidc-and-saml-20)
+19. [Event-driven triggers](#19-event-driven-triggers)
 
 ---
 
@@ -64,11 +66,16 @@ An orchestrator defines which AI provider and model your agents use, plus a shar
    - **System Prompt** — instructions shared by all agents (e.g. `You are a helpful DevOps assistant.`)
    - **Temperature** — controls creativity (0 = deterministic, 100 = very creative)
    - **Max Tokens** — upper limit per response
+   - **Failover Provider / Failover Model** — *(optional)* a backup AI provider and model to retry with if the primary fails; if left blank, failed tasks are not retried with a different model
 3. Click **Create**
 
 You can create multiple orchestrators per workspace — useful for separating a "fast" GPT-4o-mini bot from a "powerful" Claude Opus one.
 
 > If a global admin has restricted which AI providers are allowed in this workspace, only the permitted providers will appear in the dropdown.
+
+### Model failover and task retry
+
+When a **Failover Provider** and **Failover Model** are set, the executor automatically tries the backup on primary-model failure. Separately, if the orchestrator's **Max Retries** (`maxRetries`) is greater than 0, failed tasks are re-queued with exponential backoff (1 s → 2 s → 4 s … up to 30 s) up to that limit before marking the task as failed and sending notifications.
 
 ---
 
@@ -308,11 +315,11 @@ A common setup: inbound channel receives a webhook from JSM → agent creates a 
 
 ### Two-way comms — Slack / Teams inbound
 
-Enable a workspace as a **comms workspace** to allow agents to receive messages from Slack or Microsoft Teams and automatically reply in the same thread.
+A **comms workspace** is a regular workspace with the **Comms Workspace** toggle enabled. That flag tells NanoOrch to accept inbound Slack/Teams messages on channels in that workspace, route them to an agent, and post the agent's reply back to the original thread or conversation. Everything else (orchestrators, agents, integrations, quotas) works the same as any other workspace.
 
 **Step 1 — Enable the workspace**
 
-On the Workspaces page, click **New Workspace** (or ask a global admin), toggle **Comms Workspace** on, and save.
+On the Workspaces page, click **New Workspace** (or ask a global admin), toggle **Comms Workspace** on, and save. You can also edit an existing workspace and toggle it on.
 
 **Step 2 — Create a Slack inbound channel**
 
@@ -320,33 +327,74 @@ On the Workspaces page, click **New Workspace** (or ask a global admin), toggle 
 2. Set type to **Slack**
 3. Toggle **Enable two-way inbound** on
 4. Fill in:
-   - **Bot Token** — `xoxb-...` from Slack App → OAuth & Permissions
-   - **Signing Secret** — from Slack App → Basic Information
-   - **Default Agent ID** — (optional) paste an Agent ID; omit to use the first agent
+   - **Bot Token** — `xoxb-...` from Slack App → OAuth & Permissions → Bot User OAuth Token
+   - **Signing Secret** — from Slack App → Basic Information → Signing Secret
+   - **Default Agent ID** — (optional) paste an Agent ID from the **Agents** tab; omit to use the first agent in the orchestrator
+   - **DM Allowlist** — (optional) comma-separated Slack user IDs (e.g. `U01ABC, U02DEF`); only these users may DM the bot; leave blank to allow everyone
 5. Save — copy the **Events Endpoint** URL shown on the channel card
 
 **Step 3 — Wire up Slack**
 
-1. In your Slack App settings → **Event Subscriptions** → paste the Events Endpoint URL (Slack will verify it automatically via the `url_verification` challenge)
-2. Subscribe to **Bot Events**: `app_mention` and `message.im`
-3. Invite the bot to a Slack channel, then mention it: `@YourBot can you check the deploy status?`
+1. In your Slack App settings → **Event Subscriptions** → paste the Events Endpoint URL into **Request URL**
+   - NanoOrch handles the `url_verification` challenge automatically — Slack will show a green checkmark immediately
+2. Under **Subscribe to bot events**, add:
+   - `app_mention` — triggers when someone `@mentions` the bot in a channel
+   - `message.im` — triggers when someone DMs the bot directly
+3. Under **OAuth & Permissions → Scopes**, ensure the bot has at minimum:
+   - `chat:write` — to post replies
+   - `app_mentions:read` — to receive `@mention` events
+   - `im:history` — to receive DM events
+   - `chat:write` is also needed for interactive approval card buttons; additionally enable **Interactivity** in your Slack App settings and set the **Request URL** to `https://<your-host>/api/channels/<channel-id>/slack/interactions`
+4. Invite the bot to a Slack channel, then mention it: `@YourBot can you check the deploy status?`
 
 **Step 4 — Create a Teams inbound channel**
 
-1. Register a bot in [Azure Portal](https://portal.azure.com) → App Registrations → note the **App ID** and create a **client secret**
-2. Open an orchestrator → Channels → New Channel → type **Teams** → toggle **Enable two-way inbound**
-3. Fill in **App ID** and **App Password** (client secret value)
-4. Copy the Events Endpoint URL
-5. In the Azure Bot resource → Configuration → set **Messaging endpoint** to that URL
-6. In Azure Bot → Channels → add **Teams**
+1. Register a bot in [Azure Portal](https://portal.azure.com) → **App Registrations** → note the **Application (client) ID** and create a **client secret** under Certificates & secrets
+2. Create an **Azure Bot** resource, link it to the App Registration
+3. Open an orchestrator → Channels → New Channel → type **Teams** → toggle **Enable two-way inbound**
+4. Fill in:
+   - **App ID** (client ID) and **App Password** (client secret value)
+   - **DM Allowlist** — (optional) comma-separated Teams user IDs (the `from.id` field from Bot Framework activities, e.g. `29:1Abc...`); leave blank to allow everyone
+5. Copy the **Events Endpoint** URL from the channel card
+6. In the Azure Bot resource → **Configuration** → set **Messaging endpoint** to that URL
+7. In Azure Bot → **Channels** → add **Microsoft Teams**
+
+> NanoOrch verifies the Bearer JWT on every Teams event request by checking the issuer against `botframework.com` / `microsoftonline.com` and validating the token expiry. No additional certificate setup is required.
 
 **Message routing syntax**
 
-To address a specific agent, prefix the message:
+To address a specific agent, prefix the message with `use agent-name:`:
 ```
-use my-agent: summarize today's incidents
+use devops-agent: summarize today's incidents
 ```
-Without the prefix, the message goes to the Default Agent ID (or the first agent in the orchestrator).
+Without the prefix, the message goes to the **Default Agent ID** set on the channel (or the first agent in the orchestrator if no default is configured).
+
+To find an agent's ID: open the orchestrator → **Agents** tab → click the agent → the ID is shown in the agent detail panel.
+
+**Bypass approval phrases**
+
+If a message contains any of the following phrases (case-insensitive), the approval gate is automatically skipped for that task — no interactive approval card is sent:
+
+- `without approval`
+- `skip approval`
+- `approval not needed`
+- `no approval needed`
+- `bypass approval`
+
+Example: `@NanoOrchBot delete the stale staging resources without approval`
+
+Use this sparingly and only when you trust the action. Global admins can remove the DM allowlist restriction to prevent non-trusted users from using bypass phrases.
+
+**Chat commands (Slack and Teams)**
+
+Send any of these as a standalone message (no agent prefix needed):
+
+| Command | What it does |
+|---------|-------------|
+| `/status` | Shows the status of the most recent task in this thread |
+| `/reset` | Clears the conversation history for this thread (starts fresh context) |
+| `/compact` | Summarises and compacts the conversation history (reduces token usage while preserving context) |
+| `/help` | Lists available commands |
 
 ---
 
@@ -407,7 +455,7 @@ Before creating, modifying, or deleting any resource, call request_approval with
 Only proceed after receiving approval. If rejected, acknowledge and stop.
 ```
 
-### Reviewing and resolving approvals
+### Reviewing and resolving approvals — web UI
 
 1. When an agent pauses, the **Approvals** entry in the sidebar shows a badge with the pending count
 2. Open **Approvals** → find the pending request
@@ -417,6 +465,16 @@ Only proceed after receiving approval. If rejected, acknowledge and stop.
 
 All resolved approvals remain in the history with the reviewer's name and timestamp.
 
+### Reviewing and resolving approvals — Slack / Teams (interactive cards)
+
+When a task originates from a Slack or Teams message in a **comms workspace**, NanoOrch sends an interactive approval card directly into the same thread instead of waiting for a web-UI review:
+
+- **Slack**: a Block Kit card with **Approve** and **Reject** buttons appears in the thread. Any workspace admin can click a button — the decision is recorded, a confirmation message is posted, and the agent continues (or stops) automatically.
+  - Requires **Interactivity** enabled in Slack App settings, with the **Request URL** set to `https://<your-host>/api/channels/<channel-id>/slack/interactions`
+- **Teams**: an Adaptive Card with **Approve** and **Reject** action buttons is sent into the conversation. Clicking a button triggers the `invoke` activity, which NanoOrch handles to resolve the approval.
+
+> **Bypass approval**: include a bypass phrase in your message (e.g. "…without approval") and the approval gate is skipped entirely for that task. See the [Two-way comms section](#two-way-comms--slack--teams-inbound) for the full list of bypass phrases.
+
 ### Approval flow summary
 
 ```
@@ -425,8 +483,9 @@ User sends message
 Agent processes → calls request_approval tool
        ↓
 Task pauses — approval appears in sidebar (badge count +1)
+   (if task came from Slack/Teams: interactive card also sent to thread)
        ↓
-Admin reviews → Approve or Reject
+Admin reviews → Approve or Reject (web UI or Slack/Teams button)
        ↓
 Approve: task resumes → action executes → task completes
 Reject:  task cancelled → agent notified → user informed
@@ -654,6 +713,189 @@ See [`secrets/README.md`](./secrets/README.md) and the [Security Hardening](./RE
 
 ---
 
+## 18. SSO — OIDC and SAML 2.0
+
+Single Sign-On lets your users log in with their existing corporate identity (Google Workspace, Okta, Azure AD, etc.) instead of a local password. Global admins configure SSO providers at `/admin/sso` — accessible via the **SSO Settings** button on the Workspaces page.
+
+> **`APP_URL` requirement:** Set `APP_URL=https://your-nanoorch-host.com` in your `.env` (or docker-compose environment) so that callback and ACS URLs are generated correctly. Without it, URLs are derived from request headers — this works behind Nginx but may be wrong for direct IP access.
+
+---
+
+### OIDC (OpenID Connect)
+
+Compatible with Google Workspace, Azure AD (v2), Okta, Auth0, Keycloak, and any OIDC-compliant IdP.
+
+**Step 1 — Create an OAuth 2.0 app in your IdP**
+
+Register a new application in your identity provider. You will need:
+- A **Client ID** and **Client Secret**
+- A **Redirect URI** — set it to: `<APP_URL>/api/auth/sso/oidc/<provider-id>/callback`
+  (You will get the `<provider-id>` after saving the provider in step 2.)
+
+**Step 2 — Add the OIDC provider in NanoOrch**
+
+1. Go to **Workspaces** → **SSO Settings** → **Add Provider**
+2. Set **Type** to `OIDC`
+3. Fill in:
+   - **Name** — displayed on the login page (e.g. `Google Workspace`)
+   - **Discovery URL** — OIDC discovery endpoint:
+     - Google: `https://accounts.google.com`
+     - Azure AD: `https://login.microsoftonline.com/<tenant-id>/v2.0`
+     - Okta: `https://<your-okta-domain>/.well-known/openid-configuration`
+   - **Client ID** and **Client Secret** from step 1
+   - **Default Role** — role assigned to users auto-provisioned on first login
+4. Enable the **Active** toggle
+5. Click **Save** — the provider's callback URL is shown in the card
+
+**Step 3 — Register the callback URL in your IdP**
+
+Copy the callback URL from the provider card and add it as an **Authorized redirect URI** in your IdP application settings. The URL format is:
+```
+<APP_URL>/api/auth/sso/oidc/<provider-id>/callback
+```
+
+**Step 4 — Test**
+
+Log out, go to `/login` — an **SSO** button with your provider's name will appear. Click it and complete the IdP login flow. On first login, a new NanoOrch account is created automatically.
+
+---
+
+### SAML 2.0
+
+Compatible with Okta, Azure AD (SAML app), OneLogin, PingFederate, Google Workspace SAML, and any SAML 2.0-compliant IdP.
+
+**Step 1 — Add the SAML provider in NanoOrch first**
+
+1. Go to **Workspaces** → **SSO Settings** → **Add Provider**
+2. Set **Type** to `SAML`
+3. Fill in:
+   - **Name** — displayed on the login page
+   - **IdP Entry Point** — the IdP SSO URL (from your IdP configuration)
+   - **IdP Certificate** — the IdP's public certificate (PEM format, include the `-----BEGIN CERTIFICATE-----` / `-----END CERTIFICATE-----` lines)
+   - **Default Role** — role for auto-provisioned users
+4. Click **Save**
+
+**Step 2 — Configure your IdP using SP metadata**
+
+Click the **Metadata** link on the provider card to download/view the SP metadata XML:
+```
+<APP_URL>/api/auth/sso/saml/<provider-id>/metadata
+```
+
+In your IdP, create a new SAML application and import the SP metadata, or manually set:
+- **ACS URL (Assertion Consumer Service URL):** `<APP_URL>/api/auth/sso/saml/<provider-id>/acs`
+- **Entity ID / Audience:** `<APP_URL>`
+- **Name ID format:** Email address (`urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress`)
+
+**Step 3 — Test**
+
+Log out, go to `/login` — an **SSO** button will appear. Click it to be redirected to your IdP.
+
+---
+
+### Auto-provisioning
+
+On a user's **first** SSO login, NanoOrch creates a local account using their email address and the provider's **Default Role**. On subsequent logins the existing account is matched by email — no new account is created.
+
+Auto-provisioned users start with no workspace assignments. A global admin must add them to workspaces from the **Members** page.
+
+---
+
+## 19. Event-driven triggers
+
+Event triggers let GitHub, GitLab, or Jira fire an AI agent task automatically when a push, pull request, merge request, or issue event occurs.
+
+**Access:** Open a workspace → **Triggers** in the sidebar
+
+---
+
+### Creating a trigger
+
+1. Click **Add Trigger**
+2. Fill in:
+   - **Name** — human-readable label (e.g. `GitHub push → deploy agent`)
+   - **Source** — `github`, `gitlab`, or `jira`
+   - **Event Type** — the event to respond to (e.g. `push`, `pull_request`, `issue_created`)
+   - **Secret / Token** — HMAC signing secret (GitHub/GitLab) or shared token (Jira)
+   - **Orchestrator** — which orchestrator runs the triggered task
+   - **Agent** — which agent handles it (auto-populated after picking an orchestrator)
+   - **Agent Prompt** — prompt sent to the agent; supports `{{payload.field}}` substitution
+3. Enable the **Active** toggle
+4. Click **Save** — a webhook URL is generated and displayed on the trigger card
+
+---
+
+### Registering the webhook in GitHub
+
+1. Open your GitHub repository → **Settings** → **Webhooks** → **Add webhook**
+2. Set:
+   - **Payload URL**: the trigger's webhook URL shown in NanoOrch
+   - **Content type**: `application/json`
+   - **Secret**: the secret you set in the trigger
+   - **Which events**: choose individual events or "Send me everything"
+3. Click **Add webhook** — GitHub sends a ping event to verify
+
+---
+
+### Registering the webhook in GitLab
+
+1. Open your GitLab project → **Settings** → **Webhooks**
+2. Set:
+   - **URL**: the trigger's webhook URL
+   - **Secret token**: the secret from the trigger
+   - **Trigger**: check the events you want (Push events, Merge request events, etc.)
+3. Click **Add webhook**
+
+---
+
+### Registering the webhook in Jira
+
+1. In Jira: **Settings** → **System** → **WebHooks** (admin only)
+2. Set:
+   - **URL**: `<webhook-url>?token=<your-secret>` (append the token as a query param)
+   - **Events**: select the issue events to listen for
+3. Save
+
+---
+
+### Payload templating
+
+Use `{{payload.field}}` in your **Agent Prompt** to inject values from the incoming webhook JSON:
+
+| Example | Substitution |
+|---------|-------------|
+| `{{payload.repository.name}}` | GitHub: repo name |
+| `{{payload.pusher.name}}` | GitHub: user who pushed |
+| `{{payload.ref}}` | GitHub: branch/ref |
+| `{{payload.pull_request.title}}` | GitHub PR: title |
+| `{{payload.project.name}}` | GitLab: project name |
+| `{{payload.issue.summary}}` | Jira: issue summary |
+
+Nested fields and arrays are supported. The full raw payload is also appended to the prompt as additional context.
+
+**Example prompt:**
+```
+A push was made to {{payload.repository.name}} on {{payload.ref}} by {{payload.pusher.name}}.
+Check the last commit message and open any related Jira tickets if there is a TICKET-ID reference.
+```
+
+---
+
+### Event history
+
+The **Event History** tab on the Triggers page shows every webhook call for all triggers in the workspace:
+
+| Column | Description |
+|--------|-------------|
+| Timestamp | When the webhook was received |
+| Trigger | Which trigger handled it |
+| Source | `github`, `gitlab`, or `jira` |
+| Event | The event type sent by the platform |
+| Status | `success` (task created) or `error` (reason shown) |
+| Task | Link to the spawned task (if successful) |
+
+---
+
 ## Quick-start checklist
 
 - [ ] Log in as global admin
@@ -673,5 +915,7 @@ See [`secrets/README.md`](./secrets/README.md) and the [Security Hardening](./RE
 - [ ] Check Observability to see token usage and costs
 - [ ] (Optional) Set up a scheduled job with an outbound Teams or Slack channel
 - [ ] (Optional) Create member and workspace admin accounts and share the chat link
+- [ ] (Optional) Configure SSO — set `APP_URL`, add an OIDC or SAML provider at **SSO Settings**
+- [ ] (Optional) Set up Event Triggers — wire GitHub/GitLab/Jira webhooks to fire agent tasks
 - [ ] **Production:** Switch to Docker secrets — run `./secrets/create-secrets.sh` and use `docker-compose.secrets.yml`
 - [ ] **Production:** Enable `SANDBOX_RUNTIME=runsc`, `AGENT_RUNTIME=runsc`, and `SECCOMP_PROFILE` for full container hardening

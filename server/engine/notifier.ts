@@ -1,13 +1,14 @@
 import { storage } from "../storage";
 import type { Channel } from "@shared/schema";
 
-export type NotificationEvent = "task.completed" | "task.failed" | "task.approval_requested" | "job.fired";
+export type NotificationEvent = "task.completed" | "task.failed" | "task.approval_requested" | "job.fired" | "heartbeat.fired" | "heartbeat.alert";
 
 interface NotificationPayload {
   orchestratorId: string;
   taskId?: string;
   jobId?: string;
   jobName?: string;
+  agentId?: string;
   agentName?: string;
   approvalId?: string;
   action?: string;
@@ -103,5 +104,54 @@ export async function dispatchNotification(orchestratorId: string, event: Notifi
     await Promise.allSettled(channels.map((ch) => fireChannel(ch, event, { orchestratorId, ...payload })));
   } catch (err) {
     console.error("[notifier] dispatch error:", err);
+  }
+}
+
+export async function dispatchToChannel(channelId: string, label: string, text: string): Promise<void> {
+  try {
+    const ch = await storage.getChannel(channelId);
+    if (!ch) return;
+    const cfg = ch.config as { url?: string } | null;
+    if (!cfg?.url) return;
+
+    let body: string;
+    if (ch.type === "slack") {
+      body = JSON.stringify({ text: `*${label}*\n${text}` });
+    } else if (ch.type === "teams") {
+      body = JSON.stringify({
+        "@type": "MessageCard",
+        "@context": "https://schema.org/extensions",
+        themeColor: "6c5ce7",
+        summary: label,
+        sections: [{ activityTitle: `**NanoOrch — ${label}**`, activityText: text }],
+      });
+    } else if (ch.type === "google_chat") {
+      body = JSON.stringify({ text: `*${label}*\n${text}` });
+    } else {
+      body = JSON.stringify({ label, text, timestamp: new Date().toISOString() });
+    }
+
+    let statusCode: number | undefined;
+    let responseBody: string | undefined;
+    let error: string | undefined;
+
+    try {
+      const res = await fetch(cfg.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        signal: AbortSignal.timeout(10000),
+      });
+      statusCode = res.status;
+      responseBody = (await res.text()).slice(0, 500);
+    } catch (err: any) {
+      error = err?.message ?? String(err);
+    }
+
+    try {
+      await storage.logChannelDelivery({ channelId: ch.id, event: label, statusCode, responseBody, error });
+    } catch { /* best effort */ }
+  } catch (err) {
+    console.error("[notifier] dispatchToChannel error:", err);
   }
 }

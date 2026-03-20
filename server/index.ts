@@ -4,6 +4,7 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { runMigrations } from "./migrate";
 import { startScheduler } from "./engine/scheduler";
+import { startHeartbeats } from "./engine/heartbeat-scheduler";
 
 const app = express();
 const httpServer = createServer(app);
@@ -72,6 +73,7 @@ app.use((req, res, next) => {
 
   await registerRoutes(httpServer, app);
   await startScheduler();
+  await startHeartbeats();
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

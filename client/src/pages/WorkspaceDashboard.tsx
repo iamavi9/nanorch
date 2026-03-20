@@ -125,6 +125,7 @@ function StatCard({ icon: Icon, label, value, color, loading }: { icon: any; lab
 function OrchestratorCard({ orch, workspaceId }: { orch: Orchestrator; workspaceId: string }) {
   const { data: recentTasks } = useQuery<Task[]>({
     queryKey: [`/api/orchestrators/${orch.id}/tasks`],
+    select: (data: any) => data?.tasks ?? data,
   });
 
   const base = `/workspaces/${workspaceId}/orchestrators/${orch.id}`;

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Plus, Bot, Trash2, Edit, Brain, Thermometer, Wrench, ChevronDown, ChevronRight, Database, Cloud, Timer, GitBranch } from "lucide-react";
+import { Plus, Bot, Trash2, Edit, Brain, Thermometer, Wrench, ChevronDown, ChevronRight, Database, Cloud, Timer, GitBranch, Heart, Zap, Clock } from "lucide-react";
 import { SiJira, SiGithub, SiGitlab } from "react-icons/si";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,6 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -31,6 +32,13 @@ interface AgentForm {
   memoryEnabled: boolean;
   tools: string[];
   sandboxTimeoutSeconds: number | null;
+  heartbeatEnabled: boolean;
+  heartbeatIntervalMinutes: number;
+  heartbeatChecklist: string;
+  heartbeatTarget: string;
+  heartbeatModel: string;
+  heartbeatSilencePhrase: string;
+  heartbeatNotifyChannelId: string;
 }
 
 const defaultForm: AgentForm = {
@@ -42,7 +50,25 @@ const defaultForm: AgentForm = {
   memoryEnabled: false,
   tools: [],
   sandboxTimeoutSeconds: null,
+  heartbeatEnabled: false,
+  heartbeatIntervalMinutes: 30,
+  heartbeatChecklist: "",
+  heartbeatTarget: "none",
+  heartbeatModel: "",
+  heartbeatSilencePhrase: "HEARTBEAT_OK",
+  heartbeatNotifyChannelId: "",
 };
+
+const HEARTBEAT_INTERVALS = [
+  { value: "5", label: "Every 5 minutes" },
+  { value: "10", label: "Every 10 minutes" },
+  { value: "15", label: "Every 15 minutes" },
+  { value: "30", label: "Every 30 minutes" },
+  { value: "60", label: "Every hour" },
+  { value: "120", label: "Every 2 hours" },
+  { value: "240", label: "Every 4 hours" },
+  { value: "480", label: "Every 8 hours" },
+];
 
 const PROVIDER_TOOLS: Record<string, { name: string; label: string; description: string }[]> = {
   ragflow: [
@@ -209,6 +235,12 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
     queryKey: [`/api/orchestrators/${orchestratorId}/agents`],
   });
 
+  const { data: channels = [] } = useQuery<{ id: string; name: string; type: string }[]>({
+    queryKey: [`/api/workspaces/${workspaceId}/channels`],
+    enabled: !!workspaceId,
+  });
+  const outboundChannels = channels.filter((c) => ["slack", "teams", "google_chat", "generic_webhook"].includes(c.type));
+
   const createMutation = useMutation({
     mutationFn: (data: AgentForm) => apiRequest("POST", `/api/orchestrators/${orchestratorId}/agents`, data),
     onSuccess: async () => {
@@ -236,6 +268,15 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: [`/api/orchestrators/${orchestratorId}/agents`] }),
   });
 
+  const fireHeartbeatMutation = useMutation({
+    mutationFn: (id: string) => apiRequest("POST", `/api/agents/${id}/heartbeat/fire`),
+    onSuccess: async (res: any) => {
+      await queryClient.invalidateQueries({ queryKey: [`/api/orchestrators/${orchestratorId}/agents`] });
+      toast({ title: "Heartbeat fired", description: `Task ${res.taskId} created` });
+    },
+    onError: (err: any) => toast({ title: "Error", description: err.message, variant: "destructive" }),
+  });
+
   const openCreate = () => {
     setEditAgent(null);
     setForm(defaultForm);
@@ -253,6 +294,13 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
       memoryEnabled: agent.memoryEnabled ?? false,
       tools: Array.isArray(agent.tools) ? (agent.tools as string[]) : [],
       sandboxTimeoutSeconds: agent.sandboxTimeoutSeconds ?? null,
+      heartbeatEnabled: agent.heartbeatEnabled ?? false,
+      heartbeatIntervalMinutes: agent.heartbeatIntervalMinutes ?? 30,
+      heartbeatChecklist: agent.heartbeatChecklist ?? "",
+      heartbeatTarget: agent.heartbeatTarget ?? "none",
+      heartbeatModel: agent.heartbeatModel ?? "",
+      heartbeatSilencePhrase: agent.heartbeatSilencePhrase ?? "HEARTBEAT_OK",
+      heartbeatNotifyChannelId: (agent as any).heartbeatNotifyChannelId ?? "",
     });
     setOpen(true);
   };
@@ -263,6 +311,17 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
     } else {
       createMutation.mutate(form);
     }
+  };
+
+  const formatLastFired = (agent: Agent) => {
+    const lastFired = agent.heartbeatLastFiredAt;
+    if (!lastFired) return "Never";
+    const d = new Date(lastFired);
+    const diff = Date.now() - d.getTime();
+    if (diff < 60_000) return "Just now";
+    if (diff < 3600_000) return `${Math.floor(diff / 60_000)}m ago`;
+    if (diff < 86400_000) return `${Math.floor(diff / 3600_000)}h ago`;
+    return d.toLocaleDateString();
   };
 
   return (
@@ -296,6 +355,7 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {agents?.map((agent) => {
             const toolCount = Array.isArray(agent.tools) ? (agent.tools as string[]).length : 0;
+            const heartbeatOn = agent.heartbeatEnabled;
             return (
               <Card key={agent.id} className="group" data-testid={`card-agent-${agent.id}`}>
                 <CardHeader className="pb-2">
@@ -304,6 +364,19 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
                       <Bot className="w-5 h-5 text-violet-400" />
                     </div>
                     <div className="flex gap-1 opacity-0 group-hover:opacity-100">
+                      {heartbeatOn && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-green-400"
+                          onClick={() => fireHeartbeatMutation.mutate(agent.id)}
+                          disabled={fireHeartbeatMutation.isPending}
+                          title="Fire heartbeat now"
+                          data-testid={`button-fire-heartbeat-${agent.id}`}
+                        >
+                          <Zap className="w-3.5 h-3.5" />
+                        </Button>
+                      )}
                       <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(agent)}
                         data-testid={`button-edit-agent-${agent.id}`}>
                         <Edit className="w-3.5 h-3.5" />
@@ -340,7 +413,20 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
                         <Timer className="w-3 h-3" /> {agent.sandboxTimeoutSeconds}s
                       </Badge>
                     )}
+                    {heartbeatOn && (
+                      <Badge className="text-xs bg-green-500/20 text-green-400 border-green-500/30 gap-1"
+                        data-testid={`badge-heartbeat-${agent.id}`}>
+                        <Heart className="w-3 h-3" /> {agent.heartbeatIntervalMinutes ?? 30}m
+                      </Badge>
+                    )}
                   </div>
+                  {heartbeatOn && (
+                    <div className="mt-2 flex items-center gap-1 text-xs text-muted-foreground"
+                      data-testid={`text-heartbeat-last-${agent.id}`}>
+                      <Clock className="w-3 h-3" />
+                      Last fired: {formatLastFired(agent)}
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             );
@@ -428,6 +514,126 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
                 selected={form.tools}
                 onChange={(tools) => setForm({ ...form, tools })}
               />
+            </div>
+
+            <div className="rounded-lg border border-green-500/30 bg-green-500/5 p-4 space-y-4">
+              <div className="flex items-center gap-3">
+                <Switch
+                  checked={form.heartbeatEnabled}
+                  onCheckedChange={(v) => setForm({ ...form, heartbeatEnabled: v })}
+                  id="heartbeat-switch"
+                  data-testid="switch-heartbeat"
+                />
+                <Label htmlFor="heartbeat-switch" className="cursor-pointer">
+                  <span className="flex items-center gap-1.5 text-green-400">
+                    <Heart className="w-4 h-4" /> Heartbeat
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    Agent proactively monitors and alerts on a schedule
+                  </span>
+                </Label>
+              </div>
+
+              {form.heartbeatEnabled && (
+                <div className="space-y-3 pt-1">
+                  <div>
+                    <Label className="text-xs">Check Interval</Label>
+                    <Select
+                      value={String(form.heartbeatIntervalMinutes)}
+                      onValueChange={(v) => setForm({ ...form, heartbeatIntervalMinutes: parseInt(v) })}
+                    >
+                      <SelectTrigger className="mt-1" data-testid="select-heartbeat-interval">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {HEARTBEAT_INTERVALS.map((opt) => (
+                          <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div>
+                    <Label className="text-xs">Checklist (Markdown)</Label>
+                    <Textarea
+                      value={form.heartbeatChecklist}
+                      onChange={(e) => setForm({ ...form, heartbeatChecklist: e.target.value })}
+                      placeholder={`- Check for urgent unread messages\n- Look for failed jobs in the last hour\n- Report any critical alerts`}
+                      className="mt-1 font-mono text-xs"
+                      rows={5}
+                      data-testid="input-heartbeat-checklist"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Tasks to run each cycle. Leave blank for a general status check.
+                    </p>
+                  </div>
+
+                  <div>
+                    <Label className="text-xs">Alert Target</Label>
+                    <Select
+                      value={form.heartbeatTarget}
+                      onValueChange={(v) => setForm({ ...form, heartbeatTarget: v })}
+                    >
+                      <SelectTrigger className="mt-1" data-testid="select-heartbeat-target">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">None — silent (no alerts sent)</SelectItem>
+                        <SelectItem value="channel">Notify channels</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Where to send alerts when the agent finds something. Silent mode still logs the result.
+                    </p>
+                  </div>
+
+                  <div>
+                    <Label className="text-xs">Model Override (optional)</Label>
+                    <Input
+                      value={form.heartbeatModel}
+                      onChange={(e) => setForm({ ...form, heartbeatModel: e.target.value })}
+                      placeholder="e.g. gpt-4o-mini (leave blank to use orchestrator model)"
+                      className="mt-1 text-xs"
+                      data-testid="input-heartbeat-model"
+                    />
+                  </div>
+
+                  <div>
+                    <Label className="text-xs">Silence Phrase</Label>
+                    <Input
+                      value={form.heartbeatSilencePhrase}
+                      onChange={(e) => setForm({ ...form, heartbeatSilencePhrase: e.target.value })}
+                      placeholder="HEARTBEAT_OK"
+                      className="mt-1 font-mono text-xs"
+                      data-testid="input-heartbeat-silence"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      If the agent's response starts/ends with this phrase, the result is suppressed — no alert is sent.
+                    </p>
+                  </div>
+
+                  <div>
+                    <Label className="text-xs">Alert Channel (optional)</Label>
+                    <Select
+                      value={form.heartbeatNotifyChannelId || "none"}
+                      onValueChange={(v) => setForm({ ...form, heartbeatNotifyChannelId: v === "none" ? "" : v })}
+                    >
+                      <SelectTrigger className="mt-1" data-testid="select-heartbeat-channel">
+                        <SelectValue placeholder="None — use orchestrator default" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">None — use orchestrator default</SelectItem>
+                        {outboundChannels.map((ch) => (
+                          <SelectItem key={ch.id} value={ch.id}>{ch.name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Override the delivery channel for this agent's heartbeat alerts.
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
           <DialogFooter>

@@ -57,6 +57,14 @@ services:
       PORT:        3000
       MIGRATIONS_DIR: /app/migrations
 
+      # Public URL — used to build SSO (OIDC/SAML) callback and ACS URLs that are
+      # registered with the identity provider.  Must be the full origin your IdP
+      # will redirect back to (e.g. https://nanoorch.your-company.com).
+      # If left blank, NanoOrch derives it from X-Forwarded-Proto/Host headers,
+      # which works correctly behind Nginx.  Set explicitly when using direct IP
+      # access or a non-standard proxy that does not set those headers.
+      APP_URL: ${APP_URL:-}
+
       # Database
       DATABASE_URL: postgres://${POSTGRES_USER:-nanoorch}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nanoorch}
 

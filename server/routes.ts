@@ -21,6 +21,7 @@ import { tasks } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { hashPassword, verifyPassword, requireAuth, requireAdmin, requireWorkspaceAdmin } from "./lib/auth";
 import { computeNextRun, validateCron, registerJob, unregisterJob } from "./engine/scheduler";
+import { registerHeartbeatJob, unregisterHeartbeatJob, fireHeartbeatNow } from "./engine/heartbeat-scheduler";
 import { insertScheduledJobSchema } from "@shared/schema";
 import { executePipeline } from "./engine/pipeline-executor";
 import OpenAI from "openai";
@@ -28,6 +29,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { loadSecret } from "./lib/secrets";
 import { handleSlackEvent } from "./comms/slack-handler";
 import { handleTeamsEvent } from "./comms/teams-handler";
+import { handleGoogleChatEvent } from "./comms/google-chat-handler";
 import { createInferenceProxyRouter } from "./proxy/inference-proxy";
 
 // ── Chat title generator ───────────────────────────────────────────────────────
@@ -350,6 +352,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (/^\/api\/channels\/[^/]+\/webhook$/.test(req.path)) return next();
     if (/^\/api\/channels\/[^/]+\/slack\/events$/.test(req.path)) return next();
     if (/^\/api\/channels\/[^/]+\/teams\/events$/.test(req.path)) return next();
+    if (/^\/api\/auth\/sso\//.test(req.path)) return next();
+    if (/^\/api\/webhooks\//.test(req.path)) return next();
     if (!req.session?.userId) return next();
     const token = req.headers["x-csrf-token"] as string | undefined;
     if (!token || token !== req.session.csrfToken) {
@@ -423,10 +427,187 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json(workspaces);
   });
 
+  // ── SSO public endpoint — list active providers for login page ────────────
+  app.get("/api/sso/providers", async (_req, res) => {
+    const providers = await storage.getActiveSsoProviders();
+    res.json(providers.map((p) => ({ id: p.id, name: p.name, type: p.type })));
+  });
+
+  // ── OIDC — initiate login flow ────────────────────────────────────────────
+  app.get("/api/auth/sso/oidc/:id/start", async (req, res) => {
+    try {
+      const provider = await storage.getSsoProvider(req.params.id);
+      if (!provider || !provider.isActive || provider.type !== "oidc") {
+        return res.status(404).send("SSO provider not found");
+      }
+      const cfg = provider.config as { clientId: string; clientSecret: string; discoveryUrl: string };
+      const { oidcDiscover, oidcRandomState, oidcRandomCodeVerifier, oidcCodeChallenge, oidcBuildRedirectUrl } = await import("./lib/sso");
+      const oidcConfig = await oidcDiscover(cfg);
+      const state = oidcRandomState();
+      const codeVerifier = oidcRandomCodeVerifier();
+      const codeChallenge = await oidcCodeChallenge(codeVerifier);
+      const appOrigin = process.env.APP_URL?.replace(/\/$/, "") ||
+        (() => { const proto = req.headers["x-forwarded-proto"] ?? req.protocol; const host = req.headers["x-forwarded-host"] ?? req.headers.host; return `${proto}://${host}`; })();
+      const redirectUri = `${appOrigin}/api/auth/sso/oidc/${provider.id}/callback`;
+      const redirectUrl = oidcBuildRedirectUrl(oidcConfig, redirectUri, state, codeChallenge);
+      req.session.oidcState = state;
+      req.session.oidcCodeVerifier = codeVerifier;
+      req.session.oidcProviderId = provider.id;
+      req.session.oidcRedirect = (req.query.redirect as string) || "/workspaces";
+      req.session.save(() => res.redirect(redirectUrl));
+    } catch (err: any) {
+      console.error("[sso/oidc] start error:", err);
+      res.redirect(`/login?error=${encodeURIComponent("SSO initiation failed")}`);
+    }
+  });
+
+  // ── OIDC — callback (code exchange) ──────────────────────────────────────
+  app.get("/api/auth/sso/oidc/:id/callback", async (req, res) => {
+    try {
+      const provider = await storage.getSsoProvider(req.params.id);
+      if (!provider || provider.type !== "oidc") return res.status(404).send("SSO provider not found");
+      const cfg = provider.config as { clientId: string; clientSecret: string; discoveryUrl: string };
+      const { oidcDiscover, oidcHandleCallback } = await import("./lib/sso");
+      const oidcConfig = await oidcDiscover(cfg);
+      const reqProto = req.headers["x-forwarded-proto"] ?? req.protocol;
+      const reqHost = req.headers["x-forwarded-host"] ?? req.headers.host;
+      const appOrigin = process.env.APP_URL?.replace(/\/$/, "") || `${reqProto}://${reqHost}`;
+      const redirectUri = `${appOrigin}/api/auth/sso/oidc/${provider.id}/callback`;
+      const expectedState = req.session.oidcState;
+      const codeVerifier = req.session.oidcCodeVerifier;
+      const oidcRedirect = req.session.oidcRedirect || "/workspaces";
+      if (!expectedState || !codeVerifier) return res.redirect("/login?error=session_expired");
+      const currentUrl = new URL(`${reqProto}://${reqHost}${req.originalUrl}`);
+      const userInfo = await oidcHandleCallback(oidcConfig, currentUrl, expectedState, codeVerifier, redirectUri);
+      if (!userInfo.email) return res.redirect("/login?error=no_email");
+      let user = await storage.getUserByEmail(userInfo.email);
+      if (!user) {
+        const username = userInfo.email.split("@")[0].replace(/[^a-z0-9_]/gi, "_");
+        user = await storage.createUser({
+          username: `${username}_${Date.now()}`,
+          passwordHash: "",
+          name: userInfo.name ?? userInfo.email,
+          role: (provider.defaultRole as "admin" | "member") ?? "member",
+        });
+        await storage.upsertUser({ id: user.id, username: user.username ?? undefined, email: userInfo.email, name: user.name ?? undefined, role: user.role ?? "member" } as any);
+      }
+      req.session.regenerate((err) => {
+        if (err) return res.redirect("/login?error=session_error");
+        req.session.userId = user!.id;
+        req.session.userRole = user!.role ?? "member";
+        req.session.csrfToken = randomUUID();
+        req.session.save(() => res.redirect(oidcRedirect));
+      });
+    } catch (err: any) {
+      console.error("[sso/oidc] callback error:", err);
+      res.redirect(`/login?error=${encodeURIComponent(err.message ?? "SSO failed")}`);
+    }
+  });
+
+  // ── SAML — initiate login flow ────────────────────────────────────────────
+  app.get("/api/auth/sso/saml/:id/start", async (req, res) => {
+    try {
+      const provider = await storage.getSsoProvider(req.params.id);
+      if (!provider || !provider.isActive || provider.type !== "saml") return res.status(404).send("SSO provider not found");
+      const cfg = provider.config as { entryPoint: string; cert: string };
+      const { samlBuildRedirectUrl } = await import("./lib/sso");
+      const samlOrigin = process.env.APP_URL?.replace(/\/$/, "") ||
+        (() => { const p = req.headers["x-forwarded-proto"] ?? req.protocol; const h = req.headers["x-forwarded-host"] ?? req.headers.host; return `${p}://${h}`; })();
+      const samlCfg = { entryPoint: cfg.entryPoint, cert: cfg.cert, issuer: samlOrigin, callbackUrl: `${samlOrigin}/api/auth/sso/saml/${provider.id}/acs` };
+      const url = await samlBuildRedirectUrl(samlCfg);
+      req.session.samlProviderId = provider.id;
+      req.session.samlRedirect = (req.query.redirect as string) || "/workspaces";
+      req.session.save(() => res.redirect(url));
+    } catch (err: any) {
+      console.error("[sso/saml] start error:", err);
+      res.redirect(`/login?error=${encodeURIComponent("SAML initiation failed")}`);
+    }
+  });
+
+  // ── SAML — ACS (IdP posts the assertion here) ────────────────────────────
+  app.post("/api/auth/sso/saml/:id/acs", async (req, res) => {
+    try {
+      const provider = await storage.getSsoProvider(req.params.id);
+      if (!provider || provider.type !== "saml") return res.status(404).send("SSO provider not found");
+      const cfg = provider.config as { entryPoint: string; cert: string };
+      const { samlValidateResponse } = await import("./lib/sso");
+      const acsOrigin = process.env.APP_URL?.replace(/\/$/, "") ||
+        (() => { const p = req.headers["x-forwarded-proto"] ?? req.protocol; const h = req.headers["x-forwarded-host"] ?? req.headers.host; return `${p}://${h}`; })();
+      const samlCfg = { entryPoint: cfg.entryPoint, cert: cfg.cert, issuer: acsOrigin, callbackUrl: `${acsOrigin}/api/auth/sso/saml/${provider.id}/acs` };
+      const userInfo = await samlValidateResponse(samlCfg, req.body);
+      if (!userInfo.email) return res.redirect("/login?error=no_email");
+      const samlRedirect = req.session.samlRedirect || "/workspaces";
+      let user = await storage.getUserByEmail(userInfo.email);
+      if (!user) {
+        const username = userInfo.email.split("@")[0].replace(/[^a-z0-9_]/gi, "_");
+        user = await storage.createUser({
+          username: `${username}_${Date.now()}`,
+          passwordHash: "",
+          name: userInfo.name ?? userInfo.email,
+          role: (provider.defaultRole as "admin" | "member") ?? "member",
+        });
+        await storage.upsertUser({ id: user.id, username: user.username ?? undefined, email: userInfo.email, name: user.name ?? undefined, role: user.role ?? "member" } as any);
+      }
+      req.session.regenerate((err) => {
+        if (err) return res.redirect("/login?error=session_error");
+        req.session.userId = user!.id;
+        req.session.userRole = user!.role ?? "member";
+        req.session.csrfToken = randomUUID();
+        req.session.save(() => res.redirect(samlRedirect));
+      });
+    } catch (err: any) {
+      console.error("[sso/saml] acs error:", err);
+      res.redirect(`/login?error=${encodeURIComponent(err.message ?? "SAML failed")}`);
+    }
+  });
+
+  // ── SAML — SP metadata (for configuring the IdP) ─────────────────────────
+  app.get("/api/auth/sso/saml/:id/metadata", async (req, res) => {
+    try {
+      const provider = await storage.getSsoProvider(req.params.id);
+      if (!provider || provider.type !== "saml") return res.status(404).send("Not found");
+      const cfg = provider.config as { entryPoint: string; cert: string };
+      const { samlGetMetadata } = await import("./lib/sso");
+      const metaOrigin = process.env.APP_URL?.replace(/\/$/, "") ||
+        (() => { const p = req.headers["x-forwarded-proto"] ?? req.protocol; const h = req.headers["x-forwarded-host"] ?? req.headers.host; return `${p}://${h}`; })();
+      const samlCfg = { entryPoint: cfg.entryPoint, cert: cfg.cert, issuer: metaOrigin, callbackUrl: `${metaOrigin}/api/auth/sso/saml/${provider.id}/acs` };
+      const xml = samlGetMetadata(samlCfg);
+      res.type("application/xml").send(xml);
+    } catch (err) {
+      res.status(500).send("Metadata generation failed");
+    }
+  });
+
+  // ── Admin — SSO Provider CRUD ─────────────────────────────────────────────
+  app.get("/api/admin/sso-providers", requireAdmin, async (_req, res) => {
+    const providers = await storage.listSsoProviders();
+    res.json(providers);
+  });
+
+  app.post("/api/admin/sso-providers", requireAdmin, async (req, res) => {
+    const { name, type, isActive, config, defaultRole } = req.body;
+    if (!name || !type || !config) return res.status(400).json({ error: "name, type and config are required" });
+    const provider = await storage.createSsoProvider({ name, type, isActive: isActive ?? true, config, defaultRole: defaultRole ?? "member" });
+    res.status(201).json(provider);
+  });
+
+  app.put("/api/admin/sso-providers/:id", requireAdmin, async (req, res) => {
+    const { name, type, isActive, config, defaultRole } = req.body;
+    const provider = await storage.updateSsoProvider(req.params.id as string, { name, type, isActive, config, defaultRole });
+    res.json(provider);
+  });
+
+  app.delete("/api/admin/sso-providers/:id", requireAdmin, async (req, res) => {
+    await storage.deleteSsoProvider(req.params.id as string);
+    res.json({ ok: true });
+  });
+
   // ── Global auth guard (after public routes above) ─────────────────────────
   app.use("/api", (req, res, next) => {
     const isPublic =
       req.path.startsWith("/auth/") ||
+      req.path.startsWith("/sso/") ||
+      req.path.startsWith("/webhooks/") ||
       /^\/channels\/[^/]+\/webhook$/.test(req.path) ||
       /^\/channels\/[^/]+\/slack\/events$/.test(req.path) ||
       /^\/channels\/[^/]+\/teams\/events$/.test(req.path);
@@ -514,7 +695,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.put("/api/workspaces/:id/config", requireAdmin, async (req, res) => {
     const { maxOrchestrators, maxAgents, maxChannels, maxScheduledJobs,
-            allowedAiProviders, allowedCloudProviders, allowedChannelTypes } = req.body;
+            allowedAiProviders, allowedCloudProviders, allowedChannelTypes,
+            utilizationAlertThresholdTokens, utilizationAlertChannelId } = req.body;
     const cfg = await storage.upsertWorkspaceConfig(req.params.id as string, {
       maxOrchestrators: maxOrchestrators ?? null,
       maxAgents: maxAgents ?? null,
@@ -523,8 +705,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       allowedAiProviders: allowedAiProviders ?? null,
       allowedCloudProviders: allowedCloudProviders ?? null,
       allowedChannelTypes: allowedChannelTypes ?? null,
+      utilizationAlertThresholdTokens: utilizationAlertThresholdTokens ?? null,
+      utilizationAlertChannelId: utilizationAlertChannelId ?? null,
     });
     res.json(cfg);
+  });
+
+  app.get("/api/workspaces/:id/channels", requireAuth, async (req, res) => {
+    const channels = await storage.listChannelsForWorkspace(req.params.id as string);
+    res.json(channels);
   });
 
   app.get("/api/workspaces/:id/quota", requireWorkspaceAdmin, async (req, res) => {
@@ -598,6 +787,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
     }
     const agent = await storage.createAgent(parsed.data);
+    if (agent.heartbeatEnabled) registerHeartbeatJob(agent);
     res.status(201).json(agent);
   });
 
@@ -611,12 +801,27 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const parsed = insertAgentSchema.partial().safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
     const agent = await storage.updateAgent(req.params.id as string, parsed.data);
+    if (agent.heartbeatEnabled) {
+      registerHeartbeatJob(agent);
+    } else {
+      unregisterHeartbeatJob(agent.id);
+    }
     res.json(agent);
   });
 
   app.delete("/api/agents/:id", requireAuth, async (req, res) => {
+    unregisterHeartbeatJob(req.params.id as string);
     await storage.deleteAgent(req.params.id as string);
     res.status(204).send();
+  });
+
+  app.post("/api/agents/:id/heartbeat/fire", requireAuth, async (req, res) => {
+    try {
+      const taskId = await fireHeartbeatNow(req.params.id as string);
+      res.json({ taskId, message: "Heartbeat fired" });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
   });
 
   app.get("/api/orchestrators/:id/channels", requireAuth, async (req, res) => {
@@ -664,8 +869,72 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     await handleSlackEvent(req.params.id as string, req, res);
   });
 
+  app.post("/api/channels/:id/slack/interactions", webhookLimiter, async (req, res) => {
+    const channelId = req.params.id as string;
+    let payload: any;
+    try {
+      const rawPayload = typeof req.body?.payload === "string" ? req.body.payload : JSON.stringify(req.body);
+      payload = JSON.parse(typeof req.body?.payload === "string" ? req.body.payload : rawPayload);
+    } catch {
+      return res.status(400).json({ error: "invalid payload" });
+    }
+    res.status(200).send("");
+    setImmediate(async () => {
+      try {
+        const channel = await storage.getChannel(channelId);
+        if (!channel) return;
+        const cfg = channel.config as any;
+        const action = payload?.actions?.[0];
+        if (!action) return;
+        const approvalId = action.value as string;
+        const actionId = action.action_id as string;
+        const status = actionId === "approval_approve" ? "approved" : "rejected";
+        const approval = await storage.getApprovalRequest(approvalId);
+        if (!approval || approval.status !== "pending") return;
+        const userName = payload?.user?.name ?? payload?.user?.id ?? "slack-user";
+        await storage.resolveApprovalRequest(approvalId, userName, "", status);
+        const replyText = status === "approved"
+          ? `✅ Approval granted for: ${approval.action}`
+          : `❌ Approval rejected for: ${approval.action}`;
+        if (cfg?.botToken && payload?.container?.channel_id && payload?.container?.thread_ts) {
+          const botToken = cfg.botToken as string;
+          const chan = payload.container.channel_id as string;
+          const threadTs = payload.container.thread_ts as string;
+          await fetch("https://slack.com/api/chat.postMessage", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${botToken}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ channel: chan, thread_ts: threadTs, text: replyText }),
+            signal: AbortSignal.timeout(10_000),
+          });
+        }
+        if (status === "approved" && approval.taskId) {
+          const originalTask = await storage.getTask(approval.taskId);
+          if (originalTask) {
+            const newTask = await storage.createTask({
+              orchestratorId: originalTask.orchestratorId,
+              agentId: originalTask.agentId ?? undefined,
+              channelId: originalTask.channelId ?? undefined,
+              commsThreadId: originalTask.commsThreadId ?? undefined,
+              input: `${originalTask.input}\n\n[System: Approval has been granted for action "${approval.action}". Please proceed with the approved action.]`,
+              status: "pending",
+              priority: originalTask.priority ?? 5,
+              bypassApproval: true,
+            });
+            setImmediate(() => executeTask(newTask.id).catch(console.error));
+          }
+        }
+      } catch (err) {
+        console.error("[slack/interactions] error:", err);
+      }
+    });
+  });
+
   app.post("/api/channels/:id/teams/events", webhookLimiter, async (req, res) => {
     await handleTeamsEvent(req.params.id as string, req, res);
+  });
+
+  app.post("/api/channels/:id/google-chat/event", webhookLimiter, async (req, res) => {
+    await handleGoogleChatEvent(req.params.id as string, req, res);
   });
 
   app.post("/api/channels/:id/webhook", webhookLimiter, async (req, res) => {
@@ -691,8 +960,23 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   app.get("/api/orchestrators/:id/tasks", requireAuth, async (req, res) => {
-    const taskList = await storage.listTasks(req.params.id as string, 100);
-    res.json(taskList);
+    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const page = Math.max(parseInt(req.query.page as string) || 1, 1);
+    const status = req.query.status as string | undefined;
+    const offset = (page - 1) * limit;
+    const [taskList, total, pendingCount, runningCount, completedCount, failedCount] = await Promise.all([
+      storage.listTasks(req.params.id as string, limit, offset, status),
+      storage.countTasks(req.params.id as string, status),
+      storage.countTasks(req.params.id as string, "pending"),
+      storage.countTasks(req.params.id as string, "running"),
+      storage.countTasks(req.params.id as string, "completed"),
+      storage.countTasks(req.params.id as string, "failed"),
+    ]);
+    res.json({
+      tasks: taskList, total, page, limit,
+      totalPages: Math.ceil(total / limit),
+      stats: { pending: pendingCount, running: runningCount, completed: completedCount, failed: failedCount },
+    });
   });
 
   app.post("/api/orchestrators/:id/tasks", requireAuth, async (req, res) => {
@@ -831,7 +1115,25 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         // blank serviceAccountJson → leave existing credentials unchanged
       } else {
         // All other providers: decrypt existing, merge in any non-blank incoming fields
-        const existingRaw: Record<string, string> = JSON.parse(decrypt(existing.credentialsEncrypted));
+        let existingRaw: Record<string, string> = {};
+        try {
+          existingRaw = JSON.parse(decrypt(existing.credentialsEncrypted));
+        } catch {
+          // Credentials were encrypted with a different key (e.g. SESSION_SECRET changed).
+          // If the caller is providing new values we do a full replacement; otherwise reject
+          // with a clear message so the user knows to re-enter all credential fields.
+          const hasNewValues = Object.values(incoming).some(
+            (v) => typeof v === "string" && (v as string).trim(),
+          );
+          if (!hasNewValues) {
+            return res.status(422).json({
+              error:
+                "Cannot decrypt existing credentials — the encryption key has changed. " +
+                "Please re-enter all credential fields to update this integration.",
+            });
+          }
+          // existingRaw stays empty; incoming values will populate all fields below
+        }
         const merged = { ...existingRaw };
         for (const [k, v] of Object.entries(incoming)) {
           if (typeof v === "string" && v.trim()) merged[k] = v.trim();
@@ -1583,8 +1885,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // ── Approval Requests ─────────────────────────────────────────────────────
   app.get("/api/workspaces/:id/approvals", requireWorkspaceAdmin, async (req, res) => {
     const status = req.query.status as string | undefined;
-    const items = await storage.listApprovalRequests(req.params.id as string, status);
-    res.json(items);
+    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const page = Math.max(parseInt(req.query.page as string) || 1, 1);
+    const offset = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      storage.listApprovalRequests(req.params.id as string, status, limit, offset),
+      storage.countApprovalRequests(req.params.id as string, status),
+    ]);
+    res.json({ approvals: items, total, page, limit, totalPages: Math.ceil(total / limit) });
   });
 
   app.get("/api/workspaces/:id/approvals/pending-count", requireWorkspaceAdmin, async (req, res) => {
@@ -1735,6 +2043,144 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const days = parseInt(req.query.days as string ?? "30", 10) || 30;
     const stats = await storage.getWorkspaceTokenStats(req.params.id as string, days);
     res.json(stats);
+  });
+
+  // ── Event Triggers CRUD (workspace-scoped, admin) ─────────────────────────
+  app.get("/api/workspaces/:wid/triggers", requireAuth, requireWorkspaceAdmin, async (req, res) => {
+    const triggers = await storage.listEventTriggers(req.params.wid as string);
+    res.json(triggers);
+  });
+
+  app.post("/api/workspaces/:wid/triggers", requireAuth, requireWorkspaceAdmin, async (req, res) => {
+    const { orchestratorId, agentId, name, source, eventTypes, promptTemplate, secretToken, filterConfig, isActive } = req.body;
+    if (!orchestratorId || !agentId || !name || !source || !promptTemplate) {
+      return res.status(400).json({ error: "orchestratorId, agentId, name, source and promptTemplate are required" });
+    }
+    const trigger = await storage.createEventTrigger({
+      workspaceId: req.params.wid as string,
+      orchestratorId,
+      agentId,
+      name,
+      source,
+      eventTypes: eventTypes ?? [],
+      promptTemplate,
+      secretToken: secretToken ?? null,
+      filterConfig: filterConfig ?? {},
+      isActive: isActive ?? true,
+    });
+    res.status(201).json(trigger);
+  });
+
+  app.put("/api/workspaces/:wid/triggers/:tid", requireAuth, requireWorkspaceAdmin, async (req, res) => {
+    const trigger = await storage.getEventTrigger(req.params.tid as string);
+    if (!trigger || trigger.workspaceId !== (req.params.wid as string)) return res.status(404).json({ error: "Not found" });
+    const updated = await storage.updateEventTrigger(req.params.tid as string, req.body);
+    res.json(updated);
+  });
+
+  app.delete("/api/workspaces/:wid/triggers/:tid", requireAuth, requireWorkspaceAdmin, async (req, res) => {
+    const trigger = await storage.getEventTrigger(req.params.tid as string);
+    if (!trigger || trigger.workspaceId !== (req.params.wid as string)) return res.status(404).json({ error: "Not found" });
+    await storage.deleteEventTrigger(req.params.tid as string);
+    res.json({ ok: true });
+  });
+
+  app.get("/api/workspaces/:wid/triggers/:tid/events", requireAuth, requireWorkspaceAdmin, async (req, res) => {
+    const trigger = await storage.getEventTrigger(req.params.tid as string);
+    if (!trigger || trigger.workspaceId !== (req.params.wid as string)) return res.status(404).json({ error: "Not found" });
+    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const page = Math.max(parseInt(req.query.page as string) || 1, 1);
+    const offset = (page - 1) * limit;
+    const [events, total] = await Promise.all([
+      storage.listTriggerEvents(req.params.tid as string, limit, offset),
+      storage.countTriggerEvents(req.params.tid as string),
+    ]);
+    res.json({ events, total, page, limit, totalPages: Math.ceil(total / limit) });
+  });
+
+  // ── Webhook trigger helpers ───────────────────────────────────────────────
+  async function fireTrigger(trigger: { id: string; orchestratorId: string; agentId: string; source: string; eventTypes: string[] | null; promptTemplate: string }, eventType: string, payload: Record<string, unknown>) {
+    const types = trigger.eventTypes ?? [];
+    const matched = types.length === 0 || types.some((t) => eventType.toLowerCase().includes(t.toLowerCase()) || t === "*");
+
+    const renderTemplate = (template: string, data: Record<string, unknown>): string => {
+      return template.replace(/\{\{([^}]+)\}\}/g, (_, path: string) => {
+        const keys = path.trim().split(".");
+        let val: unknown = data;
+        for (const k of keys) { val = (val as Record<string, unknown>)?.[k]; }
+        return val != null ? String(val) : "";
+      });
+    };
+
+    if (!matched) {
+      await storage.logTriggerEvent({ triggerId: trigger.id, source: trigger.source, eventType, payloadPreview: JSON.stringify(payload).slice(0, 400), matched: false });
+      return;
+    }
+
+    const prompt = renderTemplate(trigger.promptTemplate, { payload });
+    const orchestrator = await storage.getOrchestrator(trigger.orchestratorId);
+    if (!orchestrator) {
+      await storage.logTriggerEvent({ triggerId: trigger.id, source: trigger.source, eventType, payloadPreview: JSON.stringify(payload).slice(0, 400), matched: true, error: "Orchestrator not found" });
+      return;
+    }
+    const task = await storage.createTask({
+      orchestratorId: trigger.orchestratorId,
+      agentId: trigger.agentId,
+      input: prompt,
+      status: "pending",
+      priority: 5,
+    });
+    await executeTask(task.id);
+    await storage.logTriggerEvent({ triggerId: trigger.id, source: trigger.source, eventType, payloadPreview: JSON.stringify(payload).slice(0, 400), matched: true, taskId: task.id });
+  }
+
+  // ── GitHub Webhook ────────────────────────────────────────────────────────
+  app.post("/api/webhooks/github/:triggerId", webhookLimiter, async (req, res) => {
+    const trigger = await storage.getEventTrigger(req.params.triggerId as string);
+    if (!trigger || !trigger.isActive || trigger.source !== "github") return res.status(404).json({ error: "Trigger not found" });
+
+    if (trigger.secretToken) {
+      const sig = req.headers["x-hub-signature-256"] as string | undefined;
+      if (!sig) return res.status(401).json({ error: "Missing signature" });
+      const { createHmac } = await import("crypto");
+      const expected = "sha256=" + createHmac("sha256", trigger.secretToken).update(JSON.stringify(req.body)).digest("hex");
+      if (sig !== expected) return res.status(401).json({ error: "Invalid signature" });
+    }
+
+    const eventType = (req.headers["x-github-event"] as string) ?? "push";
+    res.json({ ok: true });
+    fireTrigger(trigger, eventType, req.body).catch(console.error);
+  });
+
+  // ── GitLab Webhook ────────────────────────────────────────────────────────
+  app.post("/api/webhooks/gitlab/:triggerId", webhookLimiter, async (req, res) => {
+    const trigger = await storage.getEventTrigger(req.params.triggerId as string);
+    if (!trigger || !trigger.isActive || trigger.source !== "gitlab") return res.status(404).json({ error: "Trigger not found" });
+
+    if (trigger.secretToken) {
+      const token = req.headers["x-gitlab-token"] as string | undefined;
+      if (token !== trigger.secretToken) return res.status(401).json({ error: "Invalid token" });
+    }
+
+    const rawEvent = (req.headers["x-gitlab-event"] as string) ?? "";
+    const eventType = rawEvent.toLowerCase().replace(/\s+hook$/, "").replace(/\s+/g, "_");
+    res.json({ ok: true });
+    fireTrigger(trigger, eventType, req.body).catch(console.error);
+  });
+
+  // ── Jira Webhook ──────────────────────────────────────────────────────────
+  app.post("/api/webhooks/jira/:triggerId", webhookLimiter, async (req, res) => {
+    const trigger = await storage.getEventTrigger(req.params.triggerId as string);
+    if (!trigger || !trigger.isActive || trigger.source !== "jira") return res.status(404).json({ error: "Trigger not found" });
+
+    if (trigger.secretToken) {
+      const token = (req.query.token as string) ?? req.headers["x-jira-token"];
+      if (token !== trigger.secretToken) return res.status(401).json({ error: "Invalid token" });
+    }
+
+    const eventType: string = (req.body?.webhookEvent as string) ?? (req.body?.issue_event_type_name as string) ?? "jira:issue_updated";
+    res.json({ ok: true });
+    fireTrigger(trigger, eventType, req.body).catch(console.error);
   });
 
   // ── Seed default admin on startup ─────────────────────────────────────────

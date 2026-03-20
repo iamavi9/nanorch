@@ -9,6 +9,12 @@ declare module "express-session" {
     userId: string;
     userRole: string;
     csrfToken: string;
+    oidcState?: string;
+    oidcCodeVerifier?: string;
+    oidcProviderId?: string;
+    oidcRedirect?: string;
+    samlProviderId?: string;
+    samlRedirect?: string;
   }
 }
 

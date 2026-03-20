@@ -24,9 +24,13 @@ Welcome to NanoOrch. This guide covers everything you need to know as a chat use
 
 ## 1. Logging in
 
-Go to the URL your administrator gave you (e.g. `http://your-company-nanoorch.com`) and log in with your username and password.
+Go to the URL your administrator gave you (e.g. `http://your-company-nanoorch.com`) and log in.
 
-> If you have not received a username and password, contact your administrator.
+**Standard login:** Enter your username and password and click **Sign in**.
+
+**SSO login (if configured by your administrator):** Click the **Sign in with \<provider-name\>** button (e.g. "Sign in with Google Workspace" or "Sign in with Okta"). You will be redirected to your company's identity provider and then returned to NanoOrch automatically. No separate NanoOrch password is needed.
+
+> If you are unsure which login method to use, or you have not received credentials, contact your administrator.
 
 After logging in you will be taken to your workspace list.
 
@@ -348,7 +352,7 @@ If your administrator has set up a **comms workspace**, you can talk to NanoOrch
 @NanoOrchBot what is the status of our deployment?
 ```
 
-The agent will process your message and **reply in the same thread** — usually within a few seconds.
+The bot posts a brief "⏳ Thinking…" placeholder immediately, then **replaces it with the full response** when the agent finishes — usually within a few seconds.
 
 **To address a specific agent**, prefix your message with `use agent-name:`:
 ```
@@ -357,26 +361,66 @@ The agent will process your message and **reply in the same thread** — usually
 
 Without that prefix, your message goes to the default agent configured by your administrator.
 
-**Direct messages** also work — send the bot a DM and it will respond the same way.
+**Direct messages** also work — send the bot a DM (without the `@mention`) and it will respond the same way.
+
+> If your administrator has set a **DM allowlist**, only users on that list can DM the bot. Contact your administrator if you cannot DM the bot.
 
 ### Microsoft Teams
 
-Send a message to the Teams channel where the bot has been added:
+Send a message to the Teams channel where the bot has been added. You can either `@mention` the bot or simply type your message — both work:
+```
+@NanoOrchBot check the deploy pipeline for failures
+```
+or
 ```
 use devops-agent: check CloudWatch for any errors in the last hour
 ```
 
-Or just type your prompt and the default agent will reply.
+The bot replies in the same conversation thread.
+
+### If the agent needs approval
+
+Some actions (like deleting cloud resources or creating production Jira tickets) require human approval before the agent proceeds.
+
+When this happens in a Slack thread, an interactive **Approve / Reject** card appears directly in the thread — a workspace admin can click a button without leaving Slack. The same happens in Teams as an Adaptive Card with action buttons.
+
+Once approved (or rejected), the bot posts a confirmation and the agent either continues or stops.
+
+> **Skip the approval gate:** If you trust the action and want to skip the approval step, include one of these phrases in your message:
+> - `without approval`
+> - `skip approval`
+> - `no approval needed`
+> - `bypass approval`
+>
+> Example: `@NanoOrchBot delete the stale staging resources without approval`
+>
+> Use this only for actions you are confident about — there is no undo.
+
+### Chat commands
+
+You can send these commands as a standalone message (no agent prefix needed) in any thread where the bot is active:
+
+| Command | What it does |
+|---------|-------------|
+| `/status` | Shows the status of the most recent task in this thread |
+| `/reset` | Clears the conversation history for this thread and starts fresh |
+| `/compact` | Summarises and compresses the conversation history (useful for long threads) |
+| `/help` | Lists available commands |
+
+### Attaching images
+
+If you attach an image to your message, the bot notes the image URL in the task context. The agent will describe what it was given but cannot visually analyse image content unless the model supports vision.
 
 ### What the agent can do from Slack / Teams
 
-Everything it can do from the web chat — run code, query Jira, search GitHub, call AWS/GCP/Azure tools, retrieve from RAGFlow knowledge bases, and more. If an action requires approval, the agent will tell you; your administrator can approve it from the NanoOrch web UI.
+Everything it can do from the web chat — run code, query Jira, search GitHub, call AWS/GCP/Azure tools, retrieve from RAGFlow knowledge bases, and more.
 
 ### Limitations
 
 - One message = one task. Long-running tasks may take a minute or two before you see a reply.
-- Context is shared within the same Slack **thread** or Teams **conversation**. Starting a new thread starts a fresh conversation.
-- The agent cannot send attachments back to Slack/Teams — only text replies.
+- Context is shared within the same Slack **thread** or Teams **conversation** — the last 50 exchanges are remembered. Starting a new thread or a new Teams conversation starts a fresh context.
+- The agent cannot send file attachments back to Slack/Teams — only text replies.
+- If the bot does not reply after a few minutes, ask your administrator to check the task logs in the NanoOrch web UI.
 
 ---
 
@@ -395,4 +439,8 @@ Everything it can do from the web chat — run code, query Jira, search GitHub, 
 | Trigger a GitLab pipeline | `@agent trigger pipeline on [branch]` |
 | Switch workspace | Go back to the home screen (top-left logo or `/member`) |
 | Chat via Slack | Mention the bot: `@NanoOrchBot your question` |
+| DM the bot via Slack | Send a direct message — no `@mention` needed |
+| Chat via Teams | `@mention` the bot or just type your message |
 | Route to a specific agent via Slack/Teams | `use agent-name: your prompt` |
+| Check why the bot didn't reply | Ask workspace admin to check Tasks → task logs |
+| Get approval for a blocked agent action | Admin approves via Approvals in the web UI; reply arrives in same thread |

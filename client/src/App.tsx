@@ -23,6 +23,8 @@ import ObservabilityPage from "@/pages/ObservabilityPage";
 import MemberHomePage from "@/pages/MemberHomePage";
 import MemberChatPage from "@/pages/MemberChatPage";
 import AppLayout from "@/components/AppLayout";
+import SSOPage from "@/pages/SSOPage";
+import TriggersPage from "@/pages/TriggersPage";
 import { useAuth } from "@/hooks/useAuth";
 
 function AuthGuard({
@@ -215,6 +217,22 @@ function Router() {
             </AppLayout>
           </AuthGuard>
         )}
+      </Route>
+      <Route path="/workspaces/:wid/triggers">
+        {(params) => (
+          <AuthGuard adminOnly workspaceId={params.wid}>
+            <AppLayout workspaceId={params.wid}>
+              <TriggersPage workspaceId={params.wid} />
+            </AppLayout>
+          </AuthGuard>
+        )}
+      </Route>
+
+      {/* Global admin routes */}
+      <Route path="/admin/sso">
+        <AuthGuard adminOnly>
+          <SSOPage />
+        </AuthGuard>
       </Route>
 
       <Route component={NotFound} />

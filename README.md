@@ -6,18 +6,20 @@ A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, 
 
 ## Features
 
-- **Auth & 3-tier RBAC** — session-based login; global admin, workspace admin, and member roles with distinct access levels
+- **Auth & 3-tier RBAC** — session-based login; global admin, workspace admin, and member roles with distinct access levels; optional SSO via OIDC or SAML 2.0 (auto-provisions users on first login)
 - **Multi-tenant workspaces** — isolated environments per team or project
 - **Workspace resource limits** — global admins can cap how many orchestrators, agents, channels, and scheduled jobs each workspace may create, and restrict which AI providers and integration types are allowed
 - **Member management** — admins create user accounts and assign them to workspaces with a role (admin or member)
 - **Multiple orchestrators** — each workspace can have multiple orchestrators with its own AI provider, model, and system prompt
 - **Agent management** — create agents per orchestrator with individual instructions, temperature, memory, and tool access
 - **Task queue** — submit tasks via UI, webhook endpoint, API key channel, or scheduled job; real-time SSE log streaming
-- **Approval gates** — agents pause mid-task and require human sign-off before executing high-impact write operations; pending approvals appear in a dedicated sidebar section with live badge counts
+- **Approval gates** — agents pause mid-task and require human sign-off before executing high-impact write operations; pending approvals appear in a dedicated sidebar section with live badge counts; in comms workspaces, interactive **Approve / Reject** cards are sent directly into the Slack thread (Block Kit) or Teams conversation (Adaptive Cards) so reviewers can approve without leaving the messaging app
 - **Pipeline / DAG chaining** — sequential multi-step pipelines where each step's output is passed as context to the next agent; supports cron scheduling and manual triggers with per-run step history
 - **Observability** — token usage and cost dashboard across all 4 providers; daily usage charts, per-agent breakdown, provider/model cost summaries
+- **Event-driven triggers** — per-workspace webhooks that fire agent tasks on GitHub push/PR, GitLab push/merge, or Jira issue events; HMAC-SHA256 verified for GitHub/GitLab; payload template substitution `{{payload.field}}`; event history log per trigger
 - **Scheduled jobs** — cron-based agent automation with timezone support, preset schedules, manual trigger, and enable/disable toggle
-- **Two-way comms** — enable a workspace as a *comms workspace* to add Slack and Microsoft Teams inbound channels; messages mention the bot or send a direct message → the prompt is routed to an agent → the agent's reply is posted back in the same Slack thread or Teams conversation
+- **Two-way comms** — enable a workspace as a *comms workspace* to add Slack and Microsoft Teams inbound channels; messages mention the bot or DM it → prompt routed to agent → reply posted back in the same thread; includes: DM allowlist (restrict access to specific user IDs), bypass phrases to skip approval gates, chat commands (`/status` `/reset` `/compact` `/help`), typing indicator, image-attachment notes, and conversation history (last 50 exchanges remembered per thread)
+- **Model failover** — configure a backup AI provider and model on each orchestrator; if the primary model fails, the executor automatically retries with the failover model; tasks also retry with exponential backoff (up to the orchestrator's `maxRetries` limit)
 - **Outbound notifications** — send task completion/failure alerts to Slack, Teams, Google Chat, or any generic webhook; delivery history per channel
 - **AI provider switcher** — OpenAI, Anthropic, Gemini, and Ollama (on-prem); swap per orchestrator
 - **Docker-isolated execution** — action tasks run inside ephemeral containers; conversational tasks stay in-process
@@ -62,6 +64,8 @@ A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, 
 ![Code sandbox](./docs/screenshots/executor.png)
 
 *`</> running python in sandbox…` indicator streams in the chat while the agent executes code inside the gVisor-isolated container.*
+
+**Supported languages:** Python · JavaScript (Node.js) · Bash/Shell · Ruby · Go · R · Java — all executed in the same gVisor-isolated Docker container, network-isolated and memory-capped. The agent selects the language automatically based on the task; you can also request one explicitly ("write a bash script that…").
 
 ---
 
@@ -425,6 +429,73 @@ Global admins can restrict how much each workspace can use. On the **Workspaces*
 | Channel Types | Which outbound channel types (slack / teams / google_chat / generic_webhook) can be created |
 
 When a limit is hit the API returns `409 Quota exceeded`; when a disallowed provider is used it returns `403 Forbidden`.
+
+### SSO — OIDC and SAML 2.0
+
+Global admins can configure SSO providers so users log in with their corporate identity instead of a local password.
+
+**Access:** Log in as global admin → **Workspaces** page → **SSO Settings** button → `/admin/sso`
+
+**OIDC (OpenID Connect)**
+
+| Field | Description |
+|-------|-------------|
+| Discovery URL | Identity provider's OIDC discovery endpoint (e.g. `https://accounts.google.com`) |
+| Client ID | OAuth 2.0 client ID from your IdP |
+| Client Secret | OAuth 2.0 client secret from your IdP |
+| Redirect URI | Auto-generated: `<APP_URL>/api/auth/sso/oidc/<id>/callback` — register this in your IdP |
+
+**SAML 2.0**
+
+| Field | Description |
+|-------|-------------|
+| Entry Point | IdP SSO URL (e.g. Okta SSO URL) |
+| Certificate | IdP public certificate (PEM, starting with `-----BEGIN CERTIFICATE-----`) |
+| Default Role | Role assigned to auto-provisioned users (`admin` or `member`) |
+| SP Metadata | Available at `/api/auth/sso/saml/<id>/metadata` — import this into your IdP |
+| ACS URL | Auto-generated: `<APP_URL>/api/auth/sso/saml/<id>/acs` — set as the Assertion Consumer Service URL in your IdP |
+
+> **`APP_URL`**: Set this env var to your public URL (e.g. `https://nanoorch.your-company.com`) so the callback/ACS/metadata URLs are generated correctly. Without it, NanoOrch derives the origin from request headers — which works behind Nginx but may be incorrect on direct EC2 access with an IP.
+
+**Auto-provisioning:** On a user's first SSO login, NanoOrch automatically creates an account using their email address and the provider's configured **Default Role**. Subsequent logins are matched by email.
+
+---
+
+## Event-Driven Triggers
+
+Per-workspace webhook endpoints that fire an AI agent task whenever a GitHub, GitLab, or Jira event occurs.
+
+**Access:** Open a workspace → **Triggers** in the sidebar
+
+### Supported sources
+
+| Source | Events | Verification |
+|--------|--------|-------------|
+| **GitHub** | push, pull_request, and any event type | HMAC-SHA256 (`X-Hub-Signature-256`) |
+| **GitLab** | push, merge_request, and any GitLab event | HMAC-SHA256 (`X-Gitlab-Token` header) |
+| **Jira** | issue_created, issue_updated, and any Jira event | Secret token in query string (`?token=...`) |
+
+### Webhook URLs
+
+| Source | URL |
+|--------|-----|
+| GitHub | `<APP_URL>/api/webhooks/github/<trigger-id>` |
+| GitLab | `<APP_URL>/api/webhooks/gitlab/<trigger-id>` |
+| Jira | `<APP_URL>/api/webhooks/jira/<trigger-id>?token=<your-secret>` |
+
+### Payload templating
+
+The **Agent Prompt** field supports `{{payload.field}}` substitution using the incoming webhook JSON:
+
+```
+New push to {{payload.repository.name}} by {{payload.pusher.name}} on {{payload.ref}}
+```
+
+Fields can be nested (`payload.pull_request.title`) and the full raw payload is always included as additional context.
+
+### Event history
+
+Every webhook call is logged to the **Event History** tab on the Triggers page, showing timestamp, source, status, and the payload preview.
 
 ---
 
@@ -974,6 +1045,8 @@ Multiple agents in the same workspace can each target a different Jira project. 
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/channels/:id/webhook` | Submit a task from an external system |
+| `POST` | `/api/channels/:id/webhook` | Submit a task from an external system (API/Webhook channels) |
+| `POST` | `/api/channels/:id/slack/events` | Slack Event Subscriptions endpoint — handles `url_verification` challenge and `app_mention` / `message` events; HMAC-SHA256 signature verified |
+| `POST` | `/api/channels/:id/teams/events` | Microsoft Teams Bot Framework endpoint — verifies the Bearer JWT from Azure, parses `message` activities, routes to agent |
 
 ---

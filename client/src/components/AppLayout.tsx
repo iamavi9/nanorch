@@ -1,6 +1,6 @@
 import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { Bot, LayoutDashboard, Network, Radio, ListTodo, ChevronLeft, Moon, Sun, Zap, Plug, MessageSquare, Users, LogOut, Clock, ShieldAlert, GitBranch, BarChart2 } from "lucide-react";
+import { Bot, LayoutDashboard, Network, Radio, ListTodo, ChevronLeft, Moon, Sun, Zap, Plug, MessageSquare, Users, LogOut, Clock, ShieldAlert, GitBranch, BarChart2, Webhook } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useTheme } from "./ThemeProvider";
@@ -44,6 +44,7 @@ export default function AppLayout({ workspaceId, children }: AppLayoutProps) {
     { label: "Integrations", icon: Plug, path: `${basePath}/integrations` },
     { label: "Scheduled Jobs", icon: Clock, path: `${basePath}/scheduled-jobs` },
     { label: "Pipelines", icon: GitBranch, path: `${basePath}/pipelines`, badge: null },
+    { label: "Triggers", icon: Webhook, path: `${basePath}/triggers`, badge: null },
     { label: "Approvals", icon: ShieldAlert, path: `${basePath}/approvals`, badge: pendingApprovals > 0 ? pendingApprovals : null },
     { label: "Observability", icon: BarChart2, path: `${basePath}/observability`, badge: null },
   ];

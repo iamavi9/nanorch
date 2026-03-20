@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiRequest, queryClient, setCsrfToken } from "@/lib/queryClient";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
@@ -7,14 +7,25 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { APP_NAME, APP_TAGLINE } from "@/lib/config";
-import { AlertCircle, Bot } from "lucide-react";
+import { AlertCircle, Bot, LogIn } from "lucide-react";
 import type { AuthUser } from "@/hooks/useAuth";
+
+interface SsoProviderPublic {
+  id: string;
+  name: string;
+  type: "oidc" | "saml";
+}
 
 export default function LoginPage() {
   const [, navigate] = useLocation();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+
+  const { data: ssoProviders = [] } = useQuery<SsoProviderPublic[]>({
+    queryKey: ["/api/sso/providers"],
+    retry: false,
+  });
 
   const loginMutation = useMutation({
     mutationFn: async () => {
@@ -46,6 +57,17 @@ export default function LoginPage() {
     loginMutation.mutate();
   };
 
+  const ssoStart = (provider: SsoProviderPublic) => {
+    const redirect = encodeURIComponent(window.location.search.includes("redirect=")
+      ? new URLSearchParams(window.location.search).get("redirect") ?? "/workspaces"
+      : "/workspaces");
+    const type = provider.type === "saml" ? "saml" : "oidc";
+    window.location.href = `/api/auth/sso/${type}/${provider.id}/start?redirect=${redirect}`;
+  };
+
+  const params = new URLSearchParams(window.location.search);
+  const ssoError = params.get("error");
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
       <div className="w-full max-w-sm space-y-6">
@@ -56,6 +78,28 @@ export default function LoginPage() {
           </div>
           <p className="text-sm text-muted-foreground">{APP_TAGLINE}</p>
         </div>
+
+        {ssoProviders.length > 0 && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Sign in with SSO</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {ssoProviders.map((p) => (
+                <Button
+                  key={p.id}
+                  variant="outline"
+                  className="w-full justify-start gap-2"
+                  data-testid={`button-sso-${p.id}`}
+                  onClick={() => ssoStart(p)}
+                >
+                  <LogIn className="h-4 w-4" />
+                  Sign in with {p.name}
+                </Button>
+              ))}
+            </CardContent>
+          </Card>
+        )}
 
         <Card>
           <CardHeader className="pb-4">
@@ -91,10 +135,10 @@ export default function LoginPage() {
                 />
               </div>
 
-              {error && (
+              {(error || ssoError) && (
                 <div className="flex items-center gap-2 text-destructive text-sm" data-testid="text-login-error">
                   <AlertCircle className="h-4 w-4 shrink-0" />
-                  {error}
+                  {error || decodeURIComponent(ssoError ?? "")}
                 </div>
               )}
 

@@ -61,6 +61,8 @@ const DEFAULT_FORM = {
   appId: "",
   appPassword: "",
   defaultAgentId: "",
+  allowedUsers: "",
+  verificationToken: "",
 };
 
 function DeliveryBadge({ delivery }: { delivery: ChannelDelivery }) {
@@ -101,15 +103,18 @@ export default function ChannelsPage({ orchestratorId, workspaceId }: Props) {
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: [`/api/orchestrators/${orchestratorId}/channels`] });
 
+  const parseAllowedUsers = (raw: string) => raw.split(",").map((s) => s.trim()).filter(Boolean);
+
   const createMutation = useMutation({
     mutationFn: (data: typeof form) => {
       let config: Record<string, unknown> = {};
-      if (data.isInbound && (data.type === "slack" || data.type === "teams")) {
-        if (data.type === "slack") {
-          config = { isInbound: true, botToken: data.botToken, signingSecret: data.signingSecret, defaultAgentId: data.defaultAgentId || undefined };
-        } else {
-          config = { isInbound: true, appId: data.appId, appPassword: data.appPassword, defaultAgentId: data.defaultAgentId || undefined };
-        }
+      const allowedUsers = parseAllowedUsers(data.allowedUsers);
+      if (data.isInbound && data.type === "slack") {
+        config = { isInbound: true, botToken: data.botToken, signingSecret: data.signingSecret, defaultAgentId: data.defaultAgentId || undefined, ...(allowedUsers.length ? { allowedUsers } : {}) };
+      } else if (data.isInbound && data.type === "teams") {
+        config = { isInbound: true, appId: data.appId, appPassword: data.appPassword, defaultAgentId: data.defaultAgentId || undefined, ...(allowedUsers.length ? { allowedUsers } : {}) };
+      } else if (data.isInbound && data.type === "google_chat") {
+        config = { isInbound: true, verificationToken: data.verificationToken || undefined, defaultAgentId: data.defaultAgentId || undefined, ...(allowedUsers.length ? { allowedUsers } : {}) };
       } else if (OUTBOUND_TYPES.includes(data.type)) {
         config = { url: data.url, events: data.events, ...(data.secret ? { secret: data.secret } : {}) };
       }
@@ -127,11 +132,13 @@ export default function ChannelsPage({ orchestratorId, workspaceId }: Props) {
   const updateMutation = useMutation({
     mutationFn: (data: typeof editForm) => {
       let config: Record<string, unknown> = {};
-      const isInbound = data.isInbound && (data.type === "slack" || data.type === "teams");
-      if (isInbound && data.type === "slack") {
-        config = { isInbound: true, botToken: data.botToken, signingSecret: data.signingSecret, defaultAgentId: data.defaultAgentId || undefined };
-      } else if (isInbound && data.type === "teams") {
-        config = { isInbound: true, appId: data.appId, appPassword: data.appPassword, defaultAgentId: data.defaultAgentId || undefined };
+      const allowedUsers = parseAllowedUsers(data.allowedUsers);
+      if (data.isInbound && data.type === "slack") {
+        config = { isInbound: true, botToken: data.botToken, signingSecret: data.signingSecret, defaultAgentId: data.defaultAgentId || undefined, ...(allowedUsers.length ? { allowedUsers } : {}) };
+      } else if (data.isInbound && data.type === "teams") {
+        config = { isInbound: true, appId: data.appId, appPassword: data.appPassword, defaultAgentId: data.defaultAgentId || undefined, ...(allowedUsers.length ? { allowedUsers } : {}) };
+      } else if (data.isInbound && data.type === "google_chat") {
+        config = { isInbound: true, verificationToken: data.verificationToken || undefined, defaultAgentId: data.defaultAgentId || undefined, ...(allowedUsers.length ? { allowedUsers } : {}) };
       } else if (OUTBOUND_TYPES.includes(data.type)) {
         config = { url: data.url, events: data.events, ...(data.secret ? { secret: data.secret } : {}) };
       }
@@ -156,6 +163,8 @@ export default function ChannelsPage({ orchestratorId, workspaceId }: Props) {
       appId: cfg.appId ?? "",
       appPassword: cfg.appPassword ?? "",
       defaultAgentId: cfg.defaultAgentId ?? "",
+      allowedUsers: Array.isArray(cfg.allowedUsers) ? cfg.allowedUsers.join(", ") : (cfg.allowedUsers ?? ""),
+      verificationToken: cfg.verificationToken ?? "",
     });
     setEditChannel(ch);
   };
@@ -193,15 +202,16 @@ export default function ChannelsPage({ orchestratorId, workspaceId }: Props) {
     }));
   };
 
-  const comms = channels?.filter((c) => (c.type === "slack" || c.type === "teams") && (c.config as any)?.isInbound) ?? [];
+  const comms = channels?.filter((c) => (c.type === "slack" || c.type === "teams" || c.type === "google_chat") && (c.config as any)?.isInbound) ?? [];
   const inbound = channels?.filter((c) => INBOUND_TYPES.includes(c.type as ChannelType)) ?? [];
   const outbound = channels?.filter((c) => OUTBOUND_TYPES.includes(c.type as ChannelType) && !(c.config as any)?.isInbound) ?? [];
 
-  const isInboundCommsForm = form.isInbound && (form.type === "slack" || form.type === "teams");
+  const isInboundCommsForm = form.isInbound && (form.type === "slack" || form.type === "teams" || form.type === "google_chat");
   const isOutboundForm = OUTBOUND_TYPES.includes(form.type) && !isInboundCommsForm;
 
   const getSlackEventUrl = (ch: Channel) => `${window.location.origin}/api/channels/${ch.id}/slack/events`;
   const getTeamsEventUrl = (ch: Channel) => `${window.location.origin}/api/channels/${ch.id}/teams/events`;
+  const getGoogleChatEventUrl = (ch: Channel) => `${window.location.origin}/api/channels/${ch.id}/google-chat/event`;
 
   const selectedDeliveryChannel = channels?.find((c) => c.id === deliveriesChannelId);
 
@@ -226,7 +236,7 @@ export default function ChannelsPage({ orchestratorId, workspaceId }: Props) {
           {comms.length > 0 && (
             <section>
               <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">
-                Two-way Comms — Slack / Teams Inbound
+                Two-way Comms — Slack / Teams / Google Chat Inbound
               </h2>
               <div className="space-y-3">
                 {comms.map((ch) => (
@@ -237,7 +247,7 @@ export default function ChannelsPage({ orchestratorId, workspaceId }: Props) {
                     onEdit={openEdit}
                     onToggle={(id, v) => toggleMutation.mutate({ id, isActive: v })}
                     onDelete={(id) => deleteMutation.mutate(id)}
-                    getEventUrl={ch.type === "slack" ? getSlackEventUrl : getTeamsEventUrl}
+                    getEventUrl={ch.type === "slack" ? getSlackEventUrl : ch.type === "google_chat" ? getGoogleChatEventUrl : getTeamsEventUrl}
                   />
                 ))}
               </div>
@@ -330,13 +340,13 @@ export default function ChannelsPage({ orchestratorId, workspaceId }: Props) {
               </Select>
             </div>
 
-            {/* Two-way inbound toggle (only in comms workspaces for Slack/Teams) */}
-            {isCommsWorkspace && (form.type === "slack" || form.type === "teams") && (
+            {/* Two-way inbound toggle (only in comms workspaces for Slack/Teams/Google Chat) */}
+            {isCommsWorkspace && (form.type === "slack" || form.type === "teams" || form.type === "google_chat") && (
               <div className="flex items-center justify-between rounded-lg border border-border p-3 bg-muted/30">
                 <div>
                   <p className="text-sm font-medium">Enable two-way inbound</p>
                   <p className="text-xs text-muted-foreground mt-0.5">
-                    Receive messages from {form.type === "slack" ? "Slack" : "Teams"} and reply back
+                    Receive messages from {form.type === "slack" ? "Slack" : form.type === "teams" ? "Teams" : "Google Chat"} and reply back
                   </p>
                 </div>
                 <Switch
@@ -370,6 +380,13 @@ export default function ChannelsPage({ orchestratorId, workspaceId }: Props) {
                     onChange={(e) => setForm({ ...form, defaultAgentId: e.target.value })}
                     placeholder="Agent ID to route messages to" className="mt-1 font-mono text-xs" data-testid="input-default-agent-id" />
                 </div>
+                <div>
+                  <Label>DM Allowlist <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                  <Input value={form.allowedUsers}
+                    onChange={(e) => setForm({ ...form, allowedUsers: e.target.value })}
+                    placeholder="U01ABC, U02DEF (Slack user IDs, comma-separated)" className="mt-1 font-mono text-xs" data-testid="input-slack-allowed-users" />
+                  <p className="text-xs text-muted-foreground mt-1">Leave blank to allow all users. Add Slack user IDs to restrict access.</p>
+                </div>
               </>
             )}
             {isInboundCommsForm && form.type === "teams" && (
@@ -393,6 +410,30 @@ export default function ChannelsPage({ orchestratorId, workspaceId }: Props) {
                   <Input value={form.defaultAgentId}
                     onChange={(e) => setForm({ ...form, defaultAgentId: e.target.value })}
                     placeholder="Agent ID to route messages to" className="mt-1 font-mono text-xs" data-testid="input-default-agent-id" />
+                </div>
+                <div>
+                  <Label>DM Allowlist <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                  <Input value={form.allowedUsers}
+                    onChange={(e) => setForm({ ...form, allowedUsers: e.target.value })}
+                    placeholder="29:1Abc..., 29:2Def... (Teams user IDs, comma-separated)" className="mt-1 font-mono text-xs" data-testid="input-teams-allowed-users" />
+                  <p className="text-xs text-muted-foreground mt-1">Leave blank to allow all users. Add Teams user IDs (from: id) to restrict access.</p>
+                </div>
+              </>
+            )}
+            {isInboundCommsForm && form.type === "google_chat" && (
+              <>
+                <div>
+                  <Label>Verification Token <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                  <Input type="password" value={form.verificationToken}
+                    onChange={(e) => setForm({ ...form, verificationToken: e.target.value })}
+                    placeholder="From Google Chat → App config → Verification token" className="mt-1 font-mono text-xs" data-testid="input-gchat-verification-token" />
+                  <p className="text-xs text-muted-foreground mt-1">Used to verify incoming events from Google Chat. Leave blank to skip verification.</p>
+                </div>
+                <div>
+                  <Label>Default Agent ID <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                  <Input value={form.defaultAgentId}
+                    onChange={(e) => setForm({ ...form, defaultAgentId: e.target.value })}
+                    placeholder="Agent ID to route messages to" className="mt-1 font-mono text-xs" data-testid="input-gchat-default-agent-id" />
                 </div>
               </>
             )}
@@ -499,6 +540,13 @@ export default function ChannelsPage({ orchestratorId, workspaceId }: Props) {
                     onChange={(e) => setEditForm({ ...editForm, defaultAgentId: e.target.value })}
                     placeholder="Agent ID to route messages to" className="mt-1 font-mono text-xs" data-testid="input-edit-default-agent-id" />
                 </div>
+                <div>
+                  <Label>DM Allowlist <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                  <Input value={editForm.allowedUsers}
+                    onChange={(e) => setEditForm({ ...editForm, allowedUsers: e.target.value })}
+                    placeholder="U01ABC, U02DEF (Slack user IDs, comma-separated)" className="mt-1 font-mono text-xs" data-testid="input-edit-slack-allowed-users" />
+                  <p className="text-xs text-muted-foreground mt-1">Leave blank to allow all users.</p>
+                </div>
               </>
             )}
 
@@ -524,6 +572,32 @@ export default function ChannelsPage({ orchestratorId, workspaceId }: Props) {
                   <Input value={editForm.defaultAgentId}
                     onChange={(e) => setEditForm({ ...editForm, defaultAgentId: e.target.value })}
                     placeholder="Agent ID to route messages to" className="mt-1 font-mono text-xs" data-testid="input-edit-default-agent-id" />
+                </div>
+                <div>
+                  <Label>DM Allowlist <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                  <Input value={editForm.allowedUsers}
+                    onChange={(e) => setEditForm({ ...editForm, allowedUsers: e.target.value })}
+                    placeholder="29:1Abc..., 29:2Def... (Teams user IDs, comma-separated)" className="mt-1 font-mono text-xs" data-testid="input-edit-teams-allowed-users" />
+                  <p className="text-xs text-muted-foreground mt-1">Leave blank to allow all users.</p>
+                </div>
+              </>
+            )}
+
+            {/* Comms inbound — Google Chat */}
+            {editForm.isInbound && editForm.type === "google_chat" && (
+              <>
+                <div>
+                  <Label>Verification Token <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                  <Input type="password" value={editForm.verificationToken}
+                    onChange={(e) => setEditForm({ ...editForm, verificationToken: e.target.value })}
+                    placeholder="Leave blank to keep existing" className="mt-1 font-mono text-xs" data-testid="input-edit-gchat-verification-token" />
+                  <p className="text-xs text-muted-foreground mt-1">Used to verify incoming events from Google Chat. Leave blank to skip verification.</p>
+                </div>
+                <div>
+                  <Label>Default Agent ID <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                  <Input value={editForm.defaultAgentId}
+                    onChange={(e) => setEditForm({ ...editForm, defaultAgentId: e.target.value })}
+                    placeholder="Agent ID to route messages to" className="mt-1 font-mono text-xs" data-testid="input-edit-gchat-default-agent-id" />
                 </div>
               </>
             )}

@@ -1,10 +1,10 @@
-import { eq, desc, and, inArray, sql, gte } from "drizzle-orm";
+import { eq, desc, and, inArray, sql, gte, count } from "drizzle-orm";
 import { db } from "./db";
 import {
   users, workspaces, workspaceMembers, orchestrators, agents, channels, channelDeliveries, tasks, taskLogs, agentMemory, cloudIntegrations,
   chatConversations, chatMessages, scheduledJobs,
   approvalRequests, pipelines, pipelineSteps, pipelineRuns, pipelineStepRuns, tokenUsage,
-  workspaceConfig, commsThreads,
+  workspaceConfig, commsThreads, ssoProviders, eventTriggers, triggerEvents,
   type User, type InsertUser,
   type Workspace, type InsertWorkspace,
   type Orchestrator, type InsertOrchestrator,
@@ -26,6 +26,9 @@ import {
   type TokenUsage, type InsertTokenUsage,
   type WorkspaceConfig,
   type CommsThread, type InsertCommsThread,
+  type SsoProvider, type InsertSsoProvider,
+  type EventTrigger, type InsertEventTrigger,
+  type TriggerEvent,
 } from "@shared/schema";
 
 export type WorkspaceMemberWithUser = {
@@ -75,9 +78,11 @@ export interface IStorage {
   deleteOrchestrator(id: string): Promise<void>;
 
   listAgents(orchestratorId: string): Promise<Agent[]>;
+  listAgentsWithHeartbeat(): Promise<Agent[]>;
   getAgent(id: string): Promise<Agent | undefined>;
   createAgent(data: InsertAgent): Promise<Agent>;
   updateAgent(id: string, data: Partial<InsertAgent>): Promise<Agent>;
+  updateAgentHeartbeatLastFired(id: string): Promise<void>;
   deleteAgent(id: string): Promise<void>;
 
   listChannels(orchestratorId: string): Promise<Channel[]>;
@@ -87,8 +92,9 @@ export interface IStorage {
   updateChannel(id: string, data: Partial<InsertChannel>): Promise<Channel>;
   deleteChannel(id: string): Promise<void>;
 
-  listTasks(orchestratorId: string, limit?: number): Promise<Task[]>;
-  listAllTasks(limit?: number): Promise<Task[]>;
+  listTasks(orchestratorId: string, limit?: number, offset?: number, status?: string): Promise<Task[]>;
+  countTasks(orchestratorId: string, status?: string): Promise<number>;
+  listAllTasks(limit?: number, offset?: number): Promise<Task[]>;
   listPendingTasks(): Promise<Task[]>;
   getTask(id: string): Promise<Task | undefined>;
   createTask(data: InsertTask): Promise<Task>;
@@ -133,7 +139,8 @@ export interface IStorage {
   logChannelDelivery(data: { channelId: string; event: string; statusCode?: number; responseBody?: string; error?: string }): Promise<void>;
   listChannelDeliveries(channelId: string, limit?: number): Promise<ChannelDelivery[]>;
 
-  listApprovalRequests(workspaceId: string, status?: string): Promise<ApprovalRequest[]>;
+  listApprovalRequests(workspaceId: string, status?: string, limit?: number, offset?: number): Promise<ApprovalRequest[]>;
+  countApprovalRequests(workspaceId: string, status?: string): Promise<number>;
   getApprovalRequest(id: string): Promise<ApprovalRequest | undefined>;
   createApprovalRequest(data: InsertApprovalRequest): Promise<ApprovalRequest>;
   resolveApprovalRequest(id: string, resolvedBy: string, resolution: string, status: "approved" | "rejected"): Promise<ApprovalRequest>;
@@ -178,7 +185,29 @@ export interface IStorage {
   getCommsThread(channelId: string, externalThreadId: string): Promise<CommsThread | undefined>;
   getCommsThreadById(id: string): Promise<CommsThread | undefined>;
   touchCommsThread(id: string): Promise<void>;
-  updateCommsThreadRef(id: string, ref: Record<string, string>): Promise<void>;
+  updateCommsThreadRef(id: string, ref: Record<string, unknown>): Promise<void>;
+  appendCommsThreadHistory(id: string, entry: { role: string; content: string }): Promise<void>;
+  resetCommsThreadHistory(id: string): Promise<void>;
+  getLastTaskForCommsThread(commsThreadId: string): Promise<Task | undefined>;
+
+  listSsoProviders(): Promise<SsoProvider[]>;
+  getActiveSsoProviders(): Promise<SsoProvider[]>;
+  getSsoProvider(id: string): Promise<SsoProvider | undefined>;
+  createSsoProvider(data: InsertSsoProvider): Promise<SsoProvider>;
+  updateSsoProvider(id: string, data: Partial<InsertSsoProvider>): Promise<SsoProvider>;
+  deleteSsoProvider(id: string): Promise<void>;
+  getUserByEmail(email: string): Promise<User | undefined>;
+
+  listEventTriggers(workspaceId: string): Promise<EventTrigger[]>;
+  getEventTrigger(id: string): Promise<EventTrigger | undefined>;
+  createEventTrigger(data: InsertEventTrigger): Promise<EventTrigger>;
+  updateEventTrigger(id: string, data: Partial<InsertEventTrigger>): Promise<EventTrigger>;
+  deleteEventTrigger(id: string): Promise<void>;
+  logTriggerEvent(data: { triggerId: string; source: string; eventType: string; payloadPreview?: string; matched: boolean; taskId?: string; error?: string }): Promise<TriggerEvent>;
+  listTriggerEvents(triggerId: string, limit?: number, offset?: number): Promise<TriggerEvent[]>;
+  countTriggerEvents(triggerId: string): Promise<number>;
+
+  listChannelsForWorkspace(workspaceId: string): Promise<Channel[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -392,6 +421,10 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(agents).where(eq(agents.orchestratorId, orchestratorId)).orderBy(desc(agents.createdAt));
   }
 
+  async listAgentsWithHeartbeat() {
+    return db.select().from(agents).where(eq(agents.heartbeatEnabled, true));
+  }
+
   async getAgent(id: string) {
     const [agent] = await db.select().from(agents).where(eq(agents.id, id));
     return agent;
@@ -405,6 +438,10 @@ export class DatabaseStorage implements IStorage {
   async updateAgent(id: string, data: Partial<InsertAgent>) {
     const [agent] = await db.update(agents).set(data).where(eq(agents.id, id)).returning();
     return agent;
+  }
+
+  async updateAgentHeartbeatLastFired(id: string) {
+    await db.update(agents).set({ heartbeatLastFiredAt: new Date() }).where(eq(agents.id, id));
   }
 
   async deleteAgent(id: string) {
@@ -439,15 +476,27 @@ export class DatabaseStorage implements IStorage {
     await db.delete(channels).where(eq(channels.id, id));
   }
 
-  async listTasks(orchestratorId: string, limit = 50) {
+  async listTasks(orchestratorId: string, limit = 50, offset = 0, status?: string) {
+    type TaskStatus = "pending" | "running" | "completed" | "failed";
+    const conditions = [eq(tasks.orchestratorId, orchestratorId)];
+    if (status) conditions.push(eq(tasks.status, status as TaskStatus));
     return db.select().from(tasks)
-      .where(eq(tasks.orchestratorId, orchestratorId))
+      .where(and(...conditions))
       .orderBy(desc(tasks.createdAt))
-      .limit(limit);
+      .limit(limit)
+      .offset(offset);
   }
 
-  async listAllTasks(limit = 100) {
-    return db.select().from(tasks).orderBy(desc(tasks.createdAt)).limit(limit);
+  async countTasks(orchestratorId: string, status?: string): Promise<number> {
+    type TaskStatus = "pending" | "running" | "completed" | "failed";
+    const conditions = [eq(tasks.orchestratorId, orchestratorId)];
+    if (status) conditions.push(eq(tasks.status, status as TaskStatus));
+    const [row] = await db.select({ count: count() }).from(tasks).where(and(...conditions));
+    return row?.count ?? 0;
+  }
+
+  async listAllTasks(limit = 100, offset = 0) {
+    return db.select().from(tasks).orderBy(desc(tasks.createdAt)).limit(limit).offset(offset);
   }
 
   async listPendingTasks() {
@@ -606,6 +655,14 @@ export class DatabaseStorage implements IStorage {
         maxTokens: agents.maxTokens,
         temperature: agents.temperature,
         sandboxTimeoutSeconds: agents.sandboxTimeoutSeconds,
+        heartbeatEnabled: agents.heartbeatEnabled,
+        heartbeatIntervalMinutes: agents.heartbeatIntervalMinutes,
+        heartbeatChecklist: agents.heartbeatChecklist,
+        heartbeatTarget: agents.heartbeatTarget,
+        heartbeatModel: agents.heartbeatModel,
+        heartbeatSilencePhrase: agents.heartbeatSilencePhrase,
+        heartbeatLastFiredAt: agents.heartbeatLastFiredAt,
+        heartbeatNotifyChannelId: agents.heartbeatNotifyChannelId,
         createdAt: agents.createdAt,
         orchestratorName: orchestrators.name,
         provider: orchestrators.provider,
@@ -703,12 +760,21 @@ export class DatabaseStorage implements IStorage {
       .limit(limit);
   }
 
-  async listApprovalRequests(workspaceId: string, status?: string): Promise<ApprovalRequest[]> {
+  async listApprovalRequests(workspaceId: string, status?: string, limit = 20, offset = 0): Promise<ApprovalRequest[]> {
     const conditions = [eq(approvalRequests.workspaceId, workspaceId)];
     if (status) conditions.push(eq(approvalRequests.status, status));
     return db.select().from(approvalRequests)
       .where(and(...conditions))
-      .orderBy(desc(approvalRequests.createdAt));
+      .orderBy(desc(approvalRequests.createdAt))
+      .limit(limit)
+      .offset(offset);
+  }
+
+  async countApprovalRequests(workspaceId: string, status?: string): Promise<number> {
+    const conditions = [eq(approvalRequests.workspaceId, workspaceId)];
+    if (status) conditions.push(eq(approvalRequests.status, status));
+    const [row] = await db.select({ count: count() }).from(approvalRequests).where(and(...conditions));
+    return row?.count ?? 0;
   }
 
   async getApprovalRequest(id: string): Promise<ApprovalRequest | undefined> {
@@ -901,7 +967,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createCommsThread(data: InsertCommsThread): Promise<CommsThread> {
-    const [thread] = await db.insert(commsThreads).values(data).returning();
+    const [thread] = await db.insert(commsThreads).values(data as any).returning();
     return thread;
   }
 
@@ -921,8 +987,124 @@ export class DatabaseStorage implements IStorage {
     await db.update(commsThreads).set({ lastActivityAt: new Date() }).where(eq(commsThreads.id, id));
   }
 
-  async updateCommsThreadRef(id: string, ref: Record<string, string>): Promise<void> {
+  async updateCommsThreadRef(id: string, ref: Record<string, unknown>): Promise<void> {
     await db.update(commsThreads).set({ conversationRef: ref, lastActivityAt: new Date() }).where(eq(commsThreads.id, id));
+  }
+
+  async appendCommsThreadHistory(id: string, entry: { role: string; content: string }): Promise<void> {
+    const thread = await this.getCommsThreadById(id);
+    if (!thread) return;
+    const existing = (thread.history as Array<{ role: string; content: string }>) ?? [];
+    const updated = [...existing, entry].slice(-50);
+    await db.update(commsThreads).set({ history: updated, lastActivityAt: new Date() }).where(eq(commsThreads.id, id));
+  }
+
+  async resetCommsThreadHistory(id: string): Promise<void> {
+    await db.update(commsThreads).set({ history: [], lastActivityAt: new Date() }).where(eq(commsThreads.id, id));
+  }
+
+  async getLastTaskForCommsThread(commsThreadId: string): Promise<Task | undefined> {
+    const [task] = await db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.commsThreadId, commsThreadId))
+      .orderBy(desc(tasks.createdAt))
+      .limit(1);
+    return task;
+  }
+
+  // ── SSO Providers ───────────────────────────────────────────────────────────
+
+  async listSsoProviders(): Promise<SsoProvider[]> {
+    return db.select().from(ssoProviders).orderBy(ssoProviders.createdAt);
+  }
+
+  async getActiveSsoProviders(): Promise<SsoProvider[]> {
+    return db.select().from(ssoProviders).where(eq(ssoProviders.isActive, true)).orderBy(ssoProviders.name);
+  }
+
+  async getSsoProvider(id: string): Promise<SsoProvider | undefined> {
+    const [p] = await db.select().from(ssoProviders).where(eq(ssoProviders.id, id));
+    return p;
+  }
+
+  async createSsoProvider(data: InsertSsoProvider): Promise<SsoProvider> {
+    const [p] = await db.insert(ssoProviders).values(data).returning();
+    return p;
+  }
+
+  async updateSsoProvider(id: string, data: Partial<InsertSsoProvider>): Promise<SsoProvider> {
+    const [p] = await db.update(ssoProviders).set(data).where(eq(ssoProviders.id, id)).returning();
+    return p;
+  }
+
+  async deleteSsoProvider(id: string): Promise<void> {
+    await db.delete(ssoProviders).where(eq(ssoProviders.id, id));
+  }
+
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.email, email));
+    return user;
+  }
+
+  // ── Event Triggers ──────────────────────────────────────────────────────────
+
+  async listEventTriggers(workspaceId: string): Promise<EventTrigger[]> {
+    return db.select().from(eventTriggers).where(eq(eventTriggers.workspaceId, workspaceId)).orderBy(eventTriggers.createdAt);
+  }
+
+  async getEventTrigger(id: string): Promise<EventTrigger | undefined> {
+    const [t] = await db.select().from(eventTriggers).where(eq(eventTriggers.id, id));
+    return t;
+  }
+
+  async createEventTrigger(data: InsertEventTrigger): Promise<EventTrigger> {
+    const [t] = await db.insert(eventTriggers).values(data).returning();
+    return t;
+  }
+
+  async updateEventTrigger(id: string, data: Partial<InsertEventTrigger>): Promise<EventTrigger> {
+    const [t] = await db.update(eventTriggers).set(data).where(eq(eventTriggers.id, id)).returning();
+    return t;
+  }
+
+  async deleteEventTrigger(id: string): Promise<void> {
+    await db.delete(eventTriggers).where(eq(eventTriggers.id, id));
+  }
+
+  async logTriggerEvent(data: { triggerId: string; source: string; eventType: string; payloadPreview?: string; matched: boolean; taskId?: string; error?: string }): Promise<TriggerEvent> {
+    const [ev] = await db.insert(triggerEvents).values({
+      triggerId: data.triggerId,
+      source: data.source,
+      eventType: data.eventType,
+      payloadPreview: data.payloadPreview,
+      matched: data.matched,
+      taskId: data.taskId,
+      error: data.error,
+    }).returning();
+    return ev;
+  }
+
+  async listTriggerEvents(triggerId: string, limit = 20, offset = 0): Promise<TriggerEvent[]> {
+    return db.select().from(triggerEvents)
+      .where(eq(triggerEvents.triggerId, triggerId))
+      .orderBy(desc(triggerEvents.receivedAt))
+      .limit(limit)
+      .offset(offset);
+  }
+
+  async countTriggerEvents(triggerId: string): Promise<number> {
+    const [row] = await db.select({ count: count() }).from(triggerEvents).where(eq(triggerEvents.triggerId, triggerId));
+    return row?.count ?? 0;
+  }
+
+  async listChannelsForWorkspace(workspaceId: string): Promise<Channel[]> {
+    const rows = await db
+      .select({ channel: channels })
+      .from(channels)
+      .innerJoin(orchestrators, eq(channels.orchestratorId, orchestrators.id))
+      .where(eq(orchestrators.workspaceId, workspaceId));
+    return rows.map((r) => r.channel);
   }
 }
 

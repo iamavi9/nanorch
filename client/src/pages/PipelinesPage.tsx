@@ -39,7 +39,7 @@ interface PipelineRun {
   stepRuns?: Array<{ id: string; stepId: string; status: string; output?: string; error?: string; startedAt?: string; completedAt?: string }>;
 }
 
-const emptyForm = { name: "", description: "", orchestratorId: "", cronExpression: "", timezone: "UTC" };
+const emptyForm = { name: "", description: "", orchestratorId: "", cronExpression: "", timezone: "UTC", notifyChannelId: "" };
 
 function RunStatusBadge({ status }: { status: string }) {
   const map: Record<string, { label: string; class: string; icon: any }> = {
@@ -105,6 +105,7 @@ function PipelineFormFields({
   steps,
   orchestrators,
   agents,
+  channels,
   onFormChange,
   onStepChange,
   onAddStep,
@@ -115,6 +116,7 @@ function PipelineFormFields({
   steps: PipelineStep[];
   orchestrators: Orchestrator[];
   agents: Agent[];
+  channels: { id: string; name: string; type: string }[];
   onFormChange: (f: Partial<typeof emptyForm>) => void;
   onStepChange: (i: number, field: keyof PipelineStep, value: string | number) => void;
   onAddStep: () => void;
@@ -153,6 +155,25 @@ function PipelineFormFields({
           <Label>Timezone</Label>
           <Input value={form.timezone} onChange={(e) => onFormChange({ timezone: e.target.value })} placeholder="UTC" />
         </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label>Notify Channel (optional)</Label>
+        <Select
+          value={form.notifyChannelId || "none"}
+          onValueChange={(v) => onFormChange({ notifyChannelId: v === "none" ? "" : v })}
+        >
+          <SelectTrigger data-testid="select-pipeline-channel">
+            <SelectValue placeholder="None — use orchestrator default" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="none">None — use orchestrator default</SelectItem>
+            {channels.map((ch) => (
+              <SelectItem key={ch.id} value={ch.id}>{ch.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">Channel to notify when this pipeline completes or fails.</p>
       </div>
 
       <div>
@@ -235,6 +256,11 @@ export default function PipelinesPage({ workspaceId }: PipelinesPageProps) {
     queryKey: [`/api/workspaces/${workspaceId}/agents`],
   });
 
+  const { data: allChannels = [] } = useQuery<{ id: string; name: string; type: string }[]>({
+    queryKey: [`/api/workspaces/${workspaceId}/channels`],
+  });
+  const outboundChannels = allChannels.filter((c) => ["slack", "teams", "google_chat", "generic_webhook"].includes(c.type));
+
   const { data: runs = [], refetch: refetchRuns } = useQuery<PipelineRun[]>({
     queryKey: [`/api/pipelines/${viewRunsFor}/runs`],
     enabled: !!viewRunsFor,
@@ -295,6 +321,7 @@ export default function PipelinesPage({ workspaceId }: PipelinesPageProps) {
         orchestratorId: data.orchestratorId ?? "",
         cronExpression: data.cronExpression ?? "",
         timezone: data.timezone ?? "UTC",
+        notifyChannelId: (data as any).notifyChannelId ?? "",
       });
       setEditSteps(
         (data.steps ?? [])
@@ -416,6 +443,7 @@ export default function PipelinesPage({ workspaceId }: PipelinesPageProps) {
             steps={steps}
             orchestrators={orchestrators}
             agents={agents}
+            channels={outboundChannels}
             onFormChange={(f) => setForm((prev) => ({ ...prev, ...f }))}
             onStepChange={updateStep}
             onAddStep={addStep}
@@ -446,6 +474,7 @@ export default function PipelinesPage({ workspaceId }: PipelinesPageProps) {
             steps={editSteps}
             orchestrators={orchestrators}
             agents={agents}
+            channels={outboundChannels}
             onFormChange={(f) => setEditForm((prev) => ({ ...prev, ...f }))}
             onStepChange={updateEditStep}
             onAddStep={addEditStep}

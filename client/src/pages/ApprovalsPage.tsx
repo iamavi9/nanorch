@@ -10,9 +10,18 @@ import { useToast } from "@/hooks/use-toast";
 import { CheckCircle, XCircle, Clock, ShieldAlert, RefreshCw } from "lucide-react";
 import { useState } from "react";
 import type { ApprovalRequest } from "@shared/schema";
+import PaginationControls from "@/components/PaginationControls";
 
 interface ApprovalsPageProps {
   workspaceId: string;
+}
+
+interface ApprovalsResponse {
+  approvals: ApprovalRequest[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -21,22 +30,30 @@ function StatusBadge({ status }: { status: string }) {
   return <Badge variant="outline" className="text-red-600 border-red-400 bg-red-50 dark:bg-red-900/20"><XCircle className="w-3 h-3 mr-1" />Rejected</Badge>;
 }
 
+const PAGE_SIZE = 20;
+
 export default function ApprovalsPage({ workspaceId }: ApprovalsPageProps) {
   const { toast } = useToast();
   const [filter, setFilter] = useState("all");
+  const [page, setPage] = useState(1);
   const [resolving, setResolving] = useState<ApprovalRequest | null>(null);
   const [resolution, setResolution] = useState("");
 
-  const status = filter === "all" ? undefined : filter;
-  const { data: approvals = [], isLoading, refetch } = useQuery<ApprovalRequest[]>({
-    queryKey: [`/api/workspaces/${workspaceId}/approvals`, status],
+  const statusParam = filter === "all" ? undefined : filter;
+
+  const { data, isLoading, refetch } = useQuery<ApprovalsResponse>({
+    queryKey: [`/api/workspaces/${workspaceId}/approvals`, filter, page],
     queryFn: async () => {
-      const url = status
-        ? `/api/workspaces/${workspaceId}/approvals?status=${status}`
-        : `/api/workspaces/${workspaceId}/approvals`;
-      const res = await fetch(url, { credentials: "include" });
+      const params = new URLSearchParams({ page: String(page), limit: String(PAGE_SIZE) });
+      if (statusParam) params.set("status", statusParam);
+      const res = await fetch(`/api/workspaces/${workspaceId}/approvals?${params}`, { credentials: "include" });
       return res.json();
     },
+    refetchInterval: 10000,
+  });
+
+  const { data: pendingCountData } = useQuery<{ count: number }>({
+    queryKey: [`/api/workspaces/${workspaceId}/approvals/pending-count`],
     refetchInterval: 10000,
   });
 
@@ -53,7 +70,10 @@ export default function ApprovalsPage({ workspaceId }: ApprovalsPageProps) {
     onError: () => toast({ title: "Error", description: "Failed to resolve approval.", variant: "destructive" }),
   });
 
-  const pending = approvals.filter((a) => a.status === "pending");
+  const approvals = data?.approvals ?? [];
+  const pendingCount = pendingCountData?.count ?? 0;
+
+  const handleFilterChange = (v: string) => { setFilter(v); setPage(1); };
 
   return (
     <div className="p-6 max-w-5xl mx-auto space-y-6">
@@ -68,7 +88,7 @@ export default function ApprovalsPage({ workspaceId }: ApprovalsPageProps) {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Select value={filter} onValueChange={setFilter}>
+          <Select value={filter} onValueChange={handleFilterChange}>
             <SelectTrigger className="w-36" data-testid="select-approval-filter">
               <SelectValue />
             </SelectTrigger>
@@ -85,11 +105,11 @@ export default function ApprovalsPage({ workspaceId }: ApprovalsPageProps) {
         </div>
       </div>
 
-      {pending.length > 0 && (
+      {pendingCount > 0 && (
         <Card className="border-yellow-400 dark:border-yellow-600 bg-yellow-50 dark:bg-yellow-900/10">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm text-yellow-700 dark:text-yellow-400">
-              {pending.length} pending {pending.length === 1 ? "request" : "requests"} awaiting your review
+              {pendingCount} pending {pendingCount === 1 ? "request" : "requests"} awaiting your review
             </CardTitle>
           </CardHeader>
         </Card>
@@ -153,6 +173,17 @@ export default function ApprovalsPage({ workspaceId }: ApprovalsPageProps) {
           </Card>
         ))}
       </div>
+
+      {data && (
+        <PaginationControls
+          page={data.page}
+          totalPages={data.totalPages}
+          total={data.total}
+          limit={data.limit}
+          onPageChange={setPage}
+          isLoading={isLoading}
+        />
+      )}
 
       <Dialog open={!!resolving} onOpenChange={(o) => { if (!o) { setResolving(null); setResolution(""); } }}>
         <DialogContent>

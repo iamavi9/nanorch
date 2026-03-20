@@ -38,6 +38,8 @@ interface OrchestratorForm {
   maxConcurrency: number;
   maxRetries: number;
   timeoutSeconds: number;
+  failoverProvider: string;
+  failoverModel: string;
 }
 
 const defaultForm: OrchestratorForm = {
@@ -50,6 +52,8 @@ const defaultForm: OrchestratorForm = {
   maxConcurrency: 3,
   maxRetries: 2,
   timeoutSeconds: 120,
+  failoverProvider: "",
+  failoverModel: "",
 };
 
 export default function OrchestratorPage({ workspaceId, orchestratorId }: Props) {
@@ -119,6 +123,8 @@ export default function OrchestratorPage({ workspaceId, orchestratorId }: Props)
         maxConcurrency: orchestrator.maxConcurrency ?? 3,
         maxRetries: orchestrator.maxRetries ?? 2,
         timeoutSeconds: orchestrator.timeoutSeconds ?? 120,
+        failoverProvider: (orchestrator as any).failoverProvider ?? "",
+        failoverModel: (orchestrator as any).failoverModel ?? "",
       });
     }
     setEditOpen(true);
@@ -350,6 +356,67 @@ function OrchestratorFormDialog({ open, onOpenChange, form, setForm, onSubmit, i
               <Label className="text-xs">Timeout (s)</Label>
               <Input type="number" value={form.timeoutSeconds} className="mt-1"
                 onChange={(e) => setForm({ ...form, timeoutSeconds: parseInt(e.target.value) || 120 })} />
+            </div>
+          </div>
+
+          <div className="border rounded-md p-3 space-y-3 bg-muted/30">
+            <div>
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Failover Provider</p>
+              <p className="text-xs text-muted-foreground mb-3">If the primary provider fails, automatically retry with this fallback provider and model.</p>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label className="text-xs">Failover Provider</Label>
+                <Select
+                  value={form.failoverProvider || "__none__"}
+                  onValueChange={(v) => {
+                    if (v === "__none__") {
+                      setForm({ ...form, failoverProvider: "", failoverModel: "" });
+                    } else {
+                      const models = PROVIDERS.find((p) => p.id === v)?.models ?? [];
+                      setForm({ ...form, failoverProvider: v, failoverModel: models[0] ?? "" });
+                    }
+                  }}
+                >
+                  <SelectTrigger className="mt-1 text-xs" data-testid="select-failover-provider">
+                    <SelectValue placeholder="None (disabled)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">None (disabled)</SelectItem>
+                    {PROVIDERS.map((p) => (
+                      <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label className="text-xs">Failover Model</Label>
+                {form.failoverProvider === "ollama" ? (
+                  <Input
+                    value={form.failoverModel}
+                    onChange={(e) => setForm({ ...form, failoverModel: e.target.value })}
+                    placeholder="e.g. llama3.1"
+                    className="mt-1 font-mono text-xs"
+                    disabled={!form.failoverProvider}
+                    data-testid="input-failover-model"
+                  />
+                ) : (
+                  <Select
+                    value={form.failoverModel}
+                    onValueChange={(v) => setForm({ ...form, failoverModel: v })}
+                    disabled={!form.failoverProvider}
+                  >
+                    <SelectTrigger className="mt-1 text-xs" data-testid="select-failover-model">
+                      <SelectValue placeholder="Select model" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(PROVIDERS.find((p) => p.id === form.failoverProvider)?.models ?? []).map((m) => (
+                        <SelectItem key={m} value={m}>{m}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+              </div>
             </div>
           </div>
         </div>
