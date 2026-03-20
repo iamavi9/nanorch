@@ -352,6 +352,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (/^\/api\/channels\/[^/]+\/webhook$/.test(req.path)) return next();
     if (/^\/api\/channels\/[^/]+\/slack\/events$/.test(req.path)) return next();
     if (/^\/api\/channels\/[^/]+\/teams\/events$/.test(req.path)) return next();
+    if (/^\/api\/channels\/[^/]+\/google-chat\/event$/.test(req.path)) return next();
     if (/^\/api\/auth\/sso\//.test(req.path)) return next();
     if (/^\/api\/webhooks\//.test(req.path)) return next();
     if (!req.session?.userId) return next();
@@ -610,7 +611,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       req.path.startsWith("/webhooks/") ||
       /^\/channels\/[^/]+\/webhook$/.test(req.path) ||
       /^\/channels\/[^/]+\/slack\/events$/.test(req.path) ||
-      /^\/channels\/[^/]+\/teams\/events$/.test(req.path);
+      /^\/channels\/[^/]+\/teams\/events$/.test(req.path) ||
+      /^\/channels\/[^/]+\/google-chat\/event$/.test(req.path);
     if (isPublic) return next();
     return requireAuth(req, res, next);
   });
@@ -1164,6 +1166,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const decrypted = decrypt(ci.credentialsEncrypted);
       const raw = JSON.parse(decrypted);
 
+      // IMPORTANT: every provider MUST have its own explicit else-if branch here.
+      // NEVER use a catch-all else to handle a specific provider — it causes silent
+      // credential mismatches when new providers are added (e.g. slack getting treated as azure).
+      // Add a new else-if for each new provider; keep the final else as an unknown-provider guard.
       let creds: Parameters<typeof validateCredentials>[0];
       if (ci.provider === "aws") {
         creds = { provider: "aws", credentials: { accessKeyId: raw.accessKeyId, secretAccessKey: raw.secretAccessKey, region: raw.region } };
@@ -1179,8 +1185,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         creds = { provider: "gitlab", credentials: { baseUrl: raw.baseUrl, token: raw.token, defaultProjectId: raw.defaultProjectId } };
       } else if (ci.provider === "teams") {
         creds = { provider: "teams", credentials: { webhookUrl: raw.webhookUrl } };
-      } else {
+      } else if (ci.provider === "slack") {
+        creds = { provider: "slack", credentials: { botToken: raw.botToken, defaultChannel: raw.defaultChannel } };
+      } else if (ci.provider === "google_chat") {
+        creds = { provider: "google_chat", credentials: { webhookUrl: raw.webhookUrl } };
+      } else if (ci.provider === "azure") {
         creds = { provider: "azure", credentials: { clientId: raw.clientId, clientSecret: raw.clientSecret, tenantId: raw.tenantId, subscriptionId: raw.subscriptionId } };
+      } else {
+        return res.json({ ok: false, detail: `Unknown provider: ${ci.provider}` });
       }
 
       const result = await validateCredentials(creds);

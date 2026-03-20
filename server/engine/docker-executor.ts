@@ -422,6 +422,18 @@ async function loadCloudCredentials(
           provider: "teams",
           credentials: { webhookUrl: raw.webhookUrl },
         });
+      } else if (integration.provider === "slack") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "slack",
+          credentials: { botToken: raw.botToken, defaultChannel: raw.defaultChannel },
+        });
+      } else if (integration.provider === "google_chat") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "google_chat",
+          credentials: { webhookUrl: raw.webhookUrl },
+        });
       }
     } catch {
       await log("warn", `Failed to load credentials for integration "${integration.name}" — skipping`);
@@ -452,8 +464,8 @@ function buildSystemPrompt(orchestrator: Orchestrator, agent: Agent | null, hasC
 
   if (hasCloudTools) {
     parts.push(
-      `You have access to tools for cloud providers and developer platforms (AWS, GCP, Azure, RAGFlow, Jira, GitHub, GitLab). ` +
-      `When the user asks about resources or operations on any of these platforms, use the appropriate tool to fetch real data. ` +
+      `You have access to tools for cloud providers, developer platforms, and messaging services (AWS, GCP, Azure, RAGFlow, Jira, GitHub, GitLab, MS Teams, Slack, Google Chat). ` +
+      `When the user asks about resources or operations on any of these platforms, use the appropriate tool to fetch real data or send messages. ` +
       `Always summarize tool results in a clear, human-readable format.`
     );
   }

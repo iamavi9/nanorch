@@ -9,7 +9,7 @@ export const orchestratorStatusEnum = pgEnum("orchestrator_status", ["active", "
 export const taskStatusEnum = pgEnum("task_status", ["pending", "running", "completed", "failed"]);
 export const channelTypeEnum = pgEnum("channel_type", ["webhook", "api", "slack", "teams", "google_chat", "generic_webhook"]);
 export const logLevelEnum = pgEnum("log_level", ["info", "warn", "error"]);
-export const cloudProviderEnum = pgEnum("cloud_provider", ["aws", "gcp", "azure", "ragflow", "jira", "github", "gitlab", "teams"]);
+export const cloudProviderEnum = pgEnum("cloud_provider", ["aws", "gcp", "azure", "ragflow", "jira", "github", "gitlab", "teams", "slack", "google_chat"]);
 
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),

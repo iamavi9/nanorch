@@ -1,6 +1,6 @@
 # NanoOrch — AI Agent Orchestrator Platform
 
-A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, Anthropic, Gemini, and **on-prem Ollama** — with 3-tier role-based access control, per-workspace resource limits, Docker-isolated task execution, real-time monitoring, approval gates, pipeline/DAG chaining, observability dashboards, scheduled jobs, **two-way Slack/Teams messaging** (inbound messages routed to agents, replies posted back to the thread), outbound notifications, cloud integrations (AWS/GCP/Azure), DevTools integrations (Jira/GitHub/GitLab), RAGFlow knowledge base support, and a chat UI with `@agent` mentions.
+A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, Anthropic, Gemini, and **on-prem Ollama** — with 3-tier role-based access control, per-workspace resource limits, Docker-isolated task execution, real-time monitoring, approval gates, pipeline/DAG chaining, observability dashboards with utilization threshold alerts, scheduled jobs, **two-way Slack/Teams/Google Chat messaging** (inbound messages routed to agents, replies posted back to the thread), channel-based delivery for heartbeats/pipelines/jobs/triggers, outbound notifications, cloud integrations (AWS/GCP/Azure/Teams/Slack/Google Chat), DevTools integrations (Jira/GitHub/GitLab), RAGFlow knowledge base support, and a chat UI with `@agent` mentions.
 
 ---
 
@@ -15,20 +15,21 @@ A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, 
 - **Task queue** — submit tasks via UI, webhook endpoint, API key channel, or scheduled job; real-time SSE log streaming
 - **Approval gates** — agents pause mid-task and require human sign-off before executing high-impact write operations; pending approvals appear in a dedicated sidebar section with live badge counts; in comms workspaces, interactive **Approve / Reject** cards are sent directly into the Slack thread (Block Kit) or Teams conversation (Adaptive Cards) so reviewers can approve without leaving the messaging app
 - **Pipeline / DAG chaining** — sequential multi-step pipelines where each step's output is passed as context to the next agent; supports cron scheduling and manual triggers with per-run step history
-- **Observability** — token usage and cost dashboard across all 4 providers; daily usage charts, per-agent breakdown, provider/model cost summaries
+- **Observability** — token usage and cost dashboard across all 4 providers; daily usage charts, per-agent breakdown, provider/model cost summaries; configurable per-workspace **utilization threshold alerts** dispatched to any outbound channel when rolling token usage crosses a set limit
 - **Event-driven triggers** — per-workspace webhooks that fire agent tasks on GitHub push/PR, GitLab push/merge, or Jira issue events; HMAC-SHA256 verified for GitHub/GitLab; payload template substitution `{{payload.field}}`; event history log per trigger
 - **Scheduled jobs** — cron-based agent automation with timezone support, preset schedules, manual trigger, and enable/disable toggle
-- **Two-way comms** — enable a workspace as a *comms workspace* to add Slack and Microsoft Teams inbound channels; messages mention the bot or DM it → prompt routed to agent → reply posted back in the same thread; includes: DM allowlist (restrict access to specific user IDs), bypass phrases to skip approval gates, chat commands (`/status` `/reset` `/compact` `/help`), typing indicator, image-attachment notes, and conversation history (last 50 exchanges remembered per thread)
+- **Two-way comms** — enable a workspace as a *comms workspace* to add Slack, Microsoft Teams, or Google Chat inbound channels; messages mention the bot or DM it → prompt routed to agent → reply posted back in the same thread; includes: DM allowlist (restrict access to specific user IDs), bypass phrases to skip approval gates, chat commands (`/status` `/reset` `/compact` `/help`), typing indicator, image-attachment notes, and conversation history (last 50 exchanges remembered per thread)
 - **Model failover** — configure a backup AI provider and model on each orchestrator; if the primary model fails, the executor automatically retries with the failover model; tasks also retry with exponential backoff (up to the orchestrator's `maxRetries` limit)
 - **Outbound notifications** — send task completion/failure alerts to Slack, Teams, Google Chat, or any generic webhook; delivery history per channel
 - **AI provider switcher** — OpenAI, Anthropic, Gemini, and Ollama (on-prem); swap per orchestrator
 - **Docker-isolated execution** — action tasks run inside ephemeral containers; conversational tasks stay in-process
 - **Code execution** — agents write and run Python/JavaScript directly from chat inside a gVisor (`runsc`) sandbox container; fully network-isolated, read-only filesystem, memory/CPU capped
-- **Cloud integrations** — AWS, GCP, Azure with AES-256-GCM encrypted credentials and agentic tool calling
+- **Cloud integrations** — AWS, GCP, Azure with AES-256-GCM encrypted credentials and agentic tool calling; **messaging integrations** — MS Teams, Slack, Google Chat usable as agent tools (send messages, cards, notifications from any agent task)
 - **DevTools integrations** — Jira (7 tools: search/create/update issues, sprints, comments), GitHub (7 tools: repos, issues, PRs, Actions), GitLab (8 tools: issues, MRs, pipelines, triggers)
 - **RAGFlow integration** — query knowledge bases as a tool, or auto-inject context before every AI response (Context mode)
 - **Intent classification** — LLM-based classifier routes each message to action / code execution / conversational path automatically
 - **Chat UI** — per-workspace chat with `@agent` mention autocomplete (keyboard ↑↓ navigation, Enter/Tab to select) and live streaming responses
+- **Collapsible sidebar** — workspace sidebar collapses to a 60 px icon-only rail; icons are clickable with hover tooltips; preference persists in localStorage
 - **Member chat interface** — clean chat page at `/chat/:slug` for end-users (no admin UI visible)
 
 ---
@@ -425,7 +426,7 @@ Global admins can restrict how much each workspace can use. On the **Workspaces*
 | Group | What it restricts |
 |-------|------------------|
 | AI Providers | Which of openai / anthropic / gemini / ollama can be selected when creating an orchestrator |
-| Cloud Integrations | Which of aws / gcp / azure / jira / github / gitlab / ragflow / teams can be added as integrations |
+| Cloud Integrations | Which of aws / gcp / azure / jira / github / gitlab / ragflow / teams / slack / google_chat can be added as integrations |
 | Channel Types | Which outbound channel types (slack / teams / google_chat / generic_webhook) can be created |
 
 When a limit is hit the API returns `409 Quota exceeded`; when a disallowed provider is used it returns `403 Forbidden`.

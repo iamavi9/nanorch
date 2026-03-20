@@ -55,6 +55,15 @@ export interface TeamsCredentials {
   webhookUrl: string;
 }
 
+export interface SlackCredentials {
+  botToken: string;
+  defaultChannel?: string;
+}
+
+export interface GoogleChatCredentials {
+  webhookUrl: string;
+}
+
 export type CloudCredentials =
   | { provider: "aws"; credentials: AWSCredentials }
   | { provider: "gcp"; credentials: GCPCredentials }
@@ -63,7 +72,9 @@ export type CloudCredentials =
   | { provider: "jira"; credentials: JiraCredentials }
   | { provider: "github"; credentials: GitHubCredentials }
   | { provider: "gitlab"; credentials: GitLabCredentials }
-  | { provider: "teams"; credentials: TeamsCredentials };
+  | { provider: "teams"; credentials: TeamsCredentials }
+  | { provider: "slack"; credentials: SlackCredentials }
+  | { provider: "google_chat"; credentials: GoogleChatCredentials };
 
 export async function validateCredentials(creds: CloudCredentials): Promise<{ ok: boolean; detail: string }> {
   try {
@@ -177,6 +188,31 @@ export async function validateCredentials(creds: CloudCredentials): Promise<{ ok
       if (!res.ok) throw new Error(`Teams webhook responded with ${res.status}`);
       return { ok: true, detail: "Teams webhook is reachable and accepting messages" };
     }
+    if (creds.provider === "slack") {
+      const { botToken } = creds.credentials;
+      if (!botToken) throw new Error("Slack bot token is required");
+      if (!botToken.startsWith("xoxb-")) throw new Error("Slack bot token must start with xoxb-");
+      const res = await fetch("https://slack.com/api/auth.test", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${botToken}`, "Content-Type": "application/json" },
+      });
+      const data = await res.json() as any;
+      if (!data.ok) throw new Error(`Slack auth failed: ${data.error}`);
+      return { ok: true, detail: `Connected to Slack as @${data.user} (workspace: ${data.team})` };
+    }
+    if (creds.provider === "google_chat") {
+      const { webhookUrl } = creds.credentials;
+      if (!webhookUrl) throw new Error("Google Chat webhook URL is required");
+      if (!webhookUrl.startsWith("https://chat.googleapis.com/")) throw new Error("Google Chat webhook URL must start with https://chat.googleapis.com/");
+      const res = await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "NanoOrch connection test — integration is working correctly." }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`Google Chat webhook responded with ${res.status}`);
+      return { ok: true, detail: "Google Chat webhook is reachable and accepting messages" };
+    }
     return { ok: false, detail: "Unknown provider" };
   } catch (err: any) {
     return { ok: false, detail: err?.message ?? String(err) };
@@ -211,6 +247,12 @@ export async function executeCloudTool(
   }
   if (creds.provider === "teams") {
     return executeTeamsTool(toolName, toolArgs, creds.credentials);
+  }
+  if (creds.provider === "slack") {
+    return executeSlackTool(toolName, toolArgs, creds.credentials);
+  }
+  if (creds.provider === "google_chat") {
+    return executeGoogleChatTool(toolName, toolArgs, creds.credentials);
   }
   throw new Error(`Unknown cloud provider`);
 }
@@ -790,6 +832,97 @@ async function executeTeamsTool(name: string, args: Record<string, string>, cred
   }
 
   throw new Error(`Unknown Teams tool: ${name}`);
+}
+
+async function executeSlackTool(name: string, args: Record<string, string>, creds: SlackCredentials): Promise<unknown> {
+  const channel = args.channel || creds.defaultChannel || "";
+  if (!channel) throw new Error("No Slack channel specified and no default channel configured in integration");
+
+  const postJson = async (body: object) => {
+    const res = await fetch("https://slack.com/api/chat.postMessage", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${creds.botToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const data = await res.json() as any;
+    if (!data.ok) throw new Error(`Slack API error: ${data.error}`);
+    return { sent: true, ts: data.ts, channel: data.channel };
+  };
+
+  if (name === "slack_send_message") {
+    return postJson({ channel, text: args.text ?? "" });
+  }
+
+  if (name === "slack_send_notification") {
+    const fields: Array<{ title: string; value: string; short: boolean }> = [];
+    if (args.fields) {
+      try {
+        const parsed = JSON.parse(args.fields);
+        for (const [k, v] of Object.entries(parsed)) {
+          fields.push({ title: String(k), value: String(v), short: true });
+        }
+      } catch {
+        fields.push({ title: "Details", value: args.fields, short: false });
+      }
+    }
+    return postJson({
+      channel,
+      attachments: [
+        {
+          color: args.color ?? "good",
+          title: args.title ?? "",
+          text: args.body ?? "",
+          fields,
+          mrkdwn_in: ["text", "fields"],
+        },
+      ],
+    });
+  }
+
+  throw new Error(`Unknown Slack tool: ${name}`);
+}
+
+async function executeGoogleChatTool(name: string, args: Record<string, string>, creds: GoogleChatCredentials): Promise<unknown> {
+  const post = async (body: object) => {
+    const res = await fetch(creds.webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Google Chat webhook failed: ${res.status} — ${text}`);
+    }
+    return { sent: true };
+  };
+
+  if (name === "google_chat_send_message") {
+    return post({ text: args.text ?? "" });
+  }
+
+  if (name === "google_chat_send_card") {
+    const sections: object[] = [
+      { widgets: [{ textParagraph: { text: args.body ?? "" } }] },
+    ];
+    if (args.imageUrl) {
+      sections.push({ widgets: [{ image: { imageUrl: args.imageUrl, onClick: { openLink: { url: args.imageUrl } } } }] });
+    }
+    return post({
+      cards: [
+        {
+          header: {
+            title: args.title ?? "",
+            subtitle: args.subtitle ?? undefined,
+          },
+          sections,
+        },
+      ],
+    });
+  }
+
+  throw new Error(`Unknown Google Chat tool: ${name}`);
 }
 
 export async function retrieveRAGFlowContext(

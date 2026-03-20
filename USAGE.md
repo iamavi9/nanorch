@@ -43,6 +43,8 @@ Go to `http://<your-host>:3000` and log in with your credentials.
 
 A workspace is an isolated environment for a team or project. Everything — orchestrators, agents, tasks, integrations, channels, scheduled jobs, pipelines, approvals, members — lives inside a workspace.
 
+> **Sidebar tip:** The left sidebar can be collapsed to a compact icon-only rail by clicking the panel toggle button just below the workspace name. Hover over any icon to see its label. Your preference is saved automatically and restored on your next visit.
+
 > Only **global admins** can create workspaces.
 
 1. Click **New Workspace**
@@ -221,7 +223,7 @@ curl -X POST https://<host>/api/channels/<channel-id>/webhook \
 
 ## 8. Adding integrations
 
-Integrations let agents call real AWS, GCP, Azure, Jira, GitHub, GitLab, and RAGFlow APIs.
+Integrations let agents call real AWS, GCP, Azure, Jira, GitHub, GitLab, RAGFlow, and messaging platform APIs.
 
 1. Open a workspace → **Integrations** → **Add Integration**
 2. Select a provider from the dropdown and enter credentials:
@@ -248,6 +250,16 @@ Integrations let agents call real AWS, GCP, Azure, Jira, GitHub, GitLab, and RAG
 |---|---|
 | **RAGFlow** | Base URL (e.g. `http://ragflow:9380`), API Key |
 
+### Messaging
+
+Messaging integrations give agents the ability to send messages, notifications, and cards to Slack channels, Teams channels, or Google Chat spaces — as part of any task, autonomously. For example, a heartbeat agent can call `slack_send_notification` to post a status update, or a DevOps agent can call `google_chat_send_card` to send a formatted incident report.
+
+| Provider | Credentials needed |
+|---|---|
+| **MS Teams** | Incoming Webhook URL (from Teams channel connectors) |
+| **Slack** | Bot Token (`xoxb-...` from Slack App → OAuth & Permissions), optional Default Channel |
+| **Google Chat** | Incoming Webhook URL (from Google Chat space → Manage webhooks) |
+
 3. Choose an **Integration Mode**:
    - **Tool** — agent explicitly calls this integration during tasks (default for all providers except RAGFlow)
    - **Context** — knowledge auto-retrieved before every response (default for RAGFlow)
@@ -273,6 +285,9 @@ Click the **Edit** (pencil) button on any integration card to rename it, switch 
 | GitHub | `github_list_repos`, `github_list_issues`, `github_get_issue`, `github_create_issue`, `github_list_pull_requests`, `github_create_pull_request`, `github_list_workflow_runs` |
 | GitLab | `gitlab_list_projects`, `gitlab_list_issues`, `gitlab_get_issue`, `gitlab_create_issue`, `gitlab_list_merge_requests`, `gitlab_create_merge_request`, `gitlab_list_pipelines`, `gitlab_trigger_pipeline` |
 | RAGFlow | `ragflow_list_datasets`, `ragflow_query_dataset`, `ragflow_query_multiple_datasets` |
+| Teams | `teams_send_message` |
+| Slack | `slack_send_message`, `slack_send_notification` |
+| Google Chat | `google_chat_send_message`, `google_chat_send_card` |
 
 > **Security:** Credentials never enter the agent container — all tool calls execute server-side. Raw credentials are never logged.
 
@@ -313,9 +328,9 @@ Send notifications when tasks complete or fail.
 
 A common setup: inbound channel receives a webhook from JSM → agent creates a Jira issue → outbound Teams channel notifies the team automatically. Both channels live on the same orchestrator, no extra wiring needed.
 
-### Two-way comms — Slack / Teams inbound
+### Two-way comms — Slack / Teams / Google Chat inbound
 
-A **comms workspace** is a regular workspace with the **Comms Workspace** toggle enabled. That flag tells NanoOrch to accept inbound Slack/Teams messages on channels in that workspace, route them to an agent, and post the agent's reply back to the original thread or conversation. Everything else (orchestrators, agents, integrations, quotas) works the same as any other workspace.
+A **comms workspace** is a regular workspace with the **Comms Workspace** toggle enabled. That flag tells NanoOrch to accept inbound Slack, Teams, or Google Chat messages on channels in that workspace, route them to an agent, and post the agent's reply back to the original thread or conversation. Everything else (orchestrators, agents, integrations, quotas) works the same as any other workspace.
 
 **Step 1 — Enable the workspace**
 

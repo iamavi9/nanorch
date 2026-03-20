@@ -26,7 +26,7 @@
 17. [Approval Gates](#17-approval-gates)
 18. [Pipeline and DAG Executor](#18-pipeline-and-dag-executor)
 19. [Cron Scheduler](#19-cron-scheduler)
-20. [Comms System — Slack and Teams](#20-comms-system--slack-and-teams)
+20. [Comms System — Slack, Teams, and Google Chat](#20-comms-system--slack-teams-and-google-chat)
 21. [Outbound Notification System](#21-outbound-notification-system)
 22. [Event-Driven Triggers](#22-event-driven-triggers)
 23. [Observability and Cost Tracking](#23-observability-and-cost-tracking)
@@ -55,10 +55,10 @@ NanoOrch is a **self-hosted, multi-tenant AI agent orchestrator**. It lets teams
 | AI providers | OpenAI, Anthropic, Gemini, Ollama |
 | Task execution | In-process (dev) or Docker-isolated ephemeral containers (prod) |
 | Container runtimes | Docker runc (default), gVisor runsc (hardened) |
-| Tool use | AWS, GCP, Azure, Jira, GitHub, GitLab, RAGFlow, code interpreter |
+| Tool use | AWS, GCP, Azure, Jira, GitHub, GitLab, RAGFlow, Teams/Slack/Google Chat messaging, code interpreter |
 | Approval gates | Mid-task human sign-off with Slack/Teams interactive cards |
 | Pipeline / DAG | Sequential multi-agent chaining with cron scheduling |
-| Comms | Two-way Slack and Teams inbound/outbound |
+| Comms | Two-way Slack, Teams, and Google Chat inbound/outbound |
 | Triggers | GitHub, GitLab, and Jira webhook event handlers |
 | Observability | Token usage, cost estimation, per-agent breakdown |
 | Security | gVisor isolation, seccomp profiles, AES-256-GCM credential encryption, inference proxy, Docker secrets |
@@ -99,7 +99,7 @@ NanoOrch is a **self-hosted, multi-tenant AI agent orchestrator**. It lets teams
                    │  (user sessions,          │         │  OpenAI · Anthropic · Gemini  │
                    │   tasks, agents,          │         │  Ollama · AWS · GCP · Azure   │
                    │   pipelines, SSO,         │         │  Jira · GitHub · GitLab       │
-                   │   triggers, usage, ...)   │         │  RAGFlow · Slack · Teams      │
+                   │   triggers, usage, ...)   │         │  RAGFlow · Slack · Teams · Google Chat │
                    └───────────────────────────┘         └──────────────────────────────┘
                                            │
                    ┌───────────────────────▼──────────────────────────────────────────┐
@@ -186,7 +186,7 @@ nanoorch/
 │   └── src/
 │       ├── App.tsx                # Route definitions (wouter)
 │       ├── components/
-│       │   ├── AppLayout.tsx      # Sidebar navigation, auth guard
+│       │   ├── AppLayout.tsx      # Collapsible sidebar navigation, auth guard (localStorage-persisted collapse state)
 │       │   ├── ThemeProvider.tsx  # Dark/light mode context
 │       │   └── ui/                # shadcn/ui component library
 │       ├── hooks/
@@ -259,7 +259,8 @@ nanoorch/
 │   ├── comms/                     # Two-way messaging adapters
 │   │   ├── slack-handler.ts       # Slack Events API handler
 │   │   ├── teams-handler.ts       # Microsoft Teams Bot Framework handler
-│   │   ├── comms-reply.ts         # Post reply back to Slack/Teams thread
+│   │   ├── google-chat-handler.ts # Google Chat webhook handler
+│   │   ├── comms-reply.ts         # Post reply back to Slack/Teams/Google Chat thread
 │   │   └── approval-cards.ts      # Slack Block Kit + Teams Adaptive Card builders
 │   │
 │   ├── proxy/
@@ -844,7 +845,9 @@ Decryption happens in-process immediately before a tool call. Credentials are ne
 | GitHub | `@octokit/rest` | `token` |
 | GitLab | `@gitbeaker/rest` | `host`, `token` |
 | RAGFlow | Custom HTTP client | `baseUrl`, `apiKey` |
-| Teams | Bot Framework | `appId`, `appPassword` (comms inbound only) |
+| Teams | Bot Framework | `appId`, `appPassword` (comms inbound); also a cloud integration tool: `webhookUrl` |
+| Slack | Slack Web API | `botToken`, optional `defaultChannel` (comms inbound + cloud integration tools) |
+| Google Chat | Webhook + Events | `webhookUrl` (cloud integration tools + comms inbound), optional `verificationToken` |
 
 ---
 
@@ -1051,7 +1054,7 @@ Dynamic updates (create/update/delete via API) call `registerJob()` or `unregist
 
 ---
 
-## 20. Comms System — Slack and Teams
+## 20. Comms System — Slack, Teams, and Google Chat
 
 NanoOrch supports **two-way messaging** on workspaces flagged as `isCommsWorkspace = true`.
 
@@ -1096,6 +1099,24 @@ NanoOrch supports **two-way messaging** on workspaces flagged as `isCommsWorkspa
 **Interactive approvals:**
 - Sends Adaptive Cards with `Action.Submit` buttons
 - Submit actions POST to `POST /api/comms/teams/:channelId/actions`
+
+### Google Chat (`server/comms/google-chat-handler.ts`)
+
+**Inbound:**
+
+- Endpoint: `POST /api/channels/:id/google-chat/event`
+- Optionally verifies a `verificationToken` stored in channel config against a `token` field in the event body
+- Processes `MESSAGE` event types; ignores `ADDED_TO_SPACE` and `CARD_CLICKED`
+- Respects DM allowlist and bypass phrases (same logic as Slack and Teams)
+- Handles slash commands (`/status`, `/reset`, `/compact`, `/help`)
+- Creates a `comms_threads` record keyed on the Google Chat `space.name`
+- Creates a task with the user message as input
+
+**Outbound reply** (`server/comms/comms-reply.ts`):
+- POSTs to the Google Chat space webhook URL stored in the channel config
+- Replies with a plain text message (Google Chat formats markdown automatically)
+
+**Note:** Google Chat does not support interactive approval cards via webhook — approvals from Google Chat comms threads are resolved via the NanoOrch web UI.
 
 ### Conversation History
 
@@ -1321,6 +1342,17 @@ The `queryClient.ts` file sets a default query function that calls `fetch(queryK
 ### Forms
 
 All forms use `react-hook-form` with `zodResolver`. Insert schemas from `shared/schema.ts` are reused with `.extend()` for additional validation rules.
+
+### Collapsible Sidebar
+
+`AppLayout.tsx` provides the workspace sidebar. Collapse state is stored in `localStorage` under the key `nanoorch-sidebar-collapsed` and restored on load.
+
+| State | Width | Behaviour |
+|---|---|---|
+| **Expanded** (default) | 256 px (`w-64`) | Full labels, section headings, Approvals badge count, orchestrator sub-items |
+| **Collapsed** | 60 px | Icon-only rail; labels hidden; Radix Tooltip on hover shows the full label; yellow dot indicator replaces the Approvals numeric badge |
+
+The toggle button (`PanelLeftClose` / `PanelLeftOpen` icon from lucide-react) sits just below the header. A smooth CSS width transition (`transition-[width] duration-200`) prevents a jarring snap. Orchestrator sub-items (Agents / Channels / Tasks) are hidden entirely when collapsed.
 
 ### Theme
 

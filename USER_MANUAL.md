@@ -18,7 +18,7 @@ Welcome to NanoOrch. This guide covers everything you need to know as a chat use
 10. [Knowledge sources (RAGFlow)](#10-knowledge-sources-ragflow)
 11. [Tips for better results](#11-tips-for-better-results)
 12. [Troubleshooting](#12-troubleshooting)
-13. [Using agents via Slack or Teams](#13-using-agents-via-slack-or-teams)
+13. [Using agents via Slack, Teams, or Google Chat](#13-using-agents-via-slack-teams-or-google-chat)
 
 ---
 
@@ -341,9 +341,9 @@ More specific:   @jira-bot show all open P1 and P2 bugs in project CORE assigned
 
 ---
 
-## 13. Using agents via Slack or Teams
+## 13. Using agents via Slack, Teams, or Google Chat
 
-If your administrator has set up a **comms workspace**, you can talk to NanoOrch agents directly from Slack or Microsoft Teams without opening the web app.
+If your administrator has set up a **comms workspace**, you can talk to NanoOrch agents directly from Slack, Microsoft Teams, or Google Chat without opening the web app.
 
 ### Slack
 
@@ -378,6 +378,22 @@ use devops-agent: check CloudWatch for any errors in the last hour
 
 The bot replies in the same conversation thread.
 
+### Google Chat
+
+Send a message to the Google Chat space where NanoOrch has been set up:
+```
+what is the status of our deployment?
+```
+
+To address a specific agent:
+```
+use devops-agent: check CloudWatch for any errors in the last hour
+```
+
+The bot posts its reply directly in the space. Conversation history is remembered within the same space.
+
+> **Note:** Google Chat does not support interactive Approve/Reject buttons via webhook. If an agent needs approval from a Google Chat conversation, a workspace admin must approve it in the NanoOrch web UI (Approvals page). You will receive a follow-up message once the admin acts.
+
 ### If the agent needs approval
 
 Some actions (like deleting cloud resources or creating production Jira tickets) require human approval before the agent proceeds.
@@ -411,15 +427,16 @@ You can send these commands as a standalone message (no agent prefix needed) in 
 
 If you attach an image to your message, the bot notes the image URL in the task context. The agent will describe what it was given but cannot visually analyse image content unless the model supports vision.
 
-### What the agent can do from Slack / Teams
+### What the agent can do from Slack / Teams / Google Chat
 
 Everything it can do from the web chat — run code, query Jira, search GitHub, call AWS/GCP/Azure tools, retrieve from RAGFlow knowledge bases, and more.
 
 ### Limitations
 
 - One message = one task. Long-running tasks may take a minute or two before you see a reply.
-- Context is shared within the same Slack **thread** or Teams **conversation** — the last 50 exchanges are remembered. Starting a new thread or a new Teams conversation starts a fresh context.
-- The agent cannot send file attachments back to Slack/Teams — only text replies.
+- Context is shared within the same Slack **thread**, Teams **conversation**, or Google Chat **space** — the last 50 exchanges are remembered. Starting a new thread or conversation starts a fresh context.
+- The agent cannot send file attachments back to Slack/Teams/Google Chat — only text replies.
+- Interactive Approve/Reject cards are available in Slack (Block Kit) and Teams (Adaptive Cards) only — Google Chat approvals must be resolved in the NanoOrch web UI.
 - If the bot does not reply after a few minutes, ask your administrator to check the task logs in the NanoOrch web UI.
 
 ---
@@ -441,6 +458,7 @@ Everything it can do from the web chat — run code, query Jira, search GitHub, 
 | Chat via Slack | Mention the bot: `@NanoOrchBot your question` |
 | DM the bot via Slack | Send a direct message — no `@mention` needed |
 | Chat via Teams | `@mention` the bot or just type your message |
-| Route to a specific agent via Slack/Teams | `use agent-name: your prompt` |
+| Chat via Google Chat | Type your message in the configured space |
+| Route to a specific agent via Slack/Teams/Google Chat | `use agent-name: your prompt` |
 | Check why the bot didn't reply | Ask workspace admin to check Tasks → task logs |
 | Get approval for a blocked agent action | Admin approves via Approvals in the web UI; reply arrives in same thread |

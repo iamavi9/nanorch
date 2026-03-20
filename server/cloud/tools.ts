@@ -522,6 +522,64 @@ export const TEAMS_TOOLS: ToolDefinition[] = [
   },
 ];
 
+export const SLACK_TOOLS: ToolDefinition[] = [
+  {
+    name: "slack_send_message",
+    description: "Send a plain text or mrkdwn message to a Slack channel via the configured bot token",
+    parameters: {
+      type: "object",
+      properties: {
+        channel: { type: "string", description: "Slack channel ID or name (e.g. C012AB3CD or #general). Uses the default channel configured in the integration if omitted." },
+        text: { type: "string", description: "Message text (supports Slack mrkdwn formatting: *bold*, _italic_, `code`, >quote)" },
+      },
+      required: ["text"],
+    },
+  },
+  {
+    name: "slack_send_notification",
+    description: "Send a structured attachment-based notification to a Slack channel with a title, body, optional key-value fields, and a colour bar",
+    parameters: {
+      type: "object",
+      properties: {
+        channel: { type: "string", description: "Slack channel ID or name. Uses default channel if omitted." },
+        title: { type: "string", description: "Bold title shown at the top of the notification" },
+        body: { type: "string", description: "Main notification body text (mrkdwn supported)" },
+        fields: { type: "string", description: "Optional JSON object of key-value pairs shown as fields, e.g. {\"Status\": \"OK\", \"Agent\": \"Heartbeat\"}" },
+        color: { type: "string", description: "Attachment colour: good (green), warning (yellow), danger (red), or any CSS hex colour e.g. #0076D7" },
+      },
+      required: ["title", "body"],
+    },
+  },
+];
+
+export const GOOGLE_CHAT_TOOLS: ToolDefinition[] = [
+  {
+    name: "google_chat_send_message",
+    description: "Send a plain text message to the configured Google Chat space via incoming webhook",
+    parameters: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Message text to send. Supports basic Google Chat formatting (*bold*, _italic_, ~strikethrough~, `code`)." },
+      },
+      required: ["text"],
+    },
+  },
+  {
+    name: "google_chat_send_card",
+    description: "Send a formatted card to Google Chat with a title, optional subtitle, and body text",
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Card header title shown prominently" },
+        subtitle: { type: "string", description: "Optional subtitle shown below the title" },
+        body: { type: "string", description: "Main card body text" },
+        imageUrl: { type: "string", description: "Optional HTTPS image URL to display in the card" },
+      },
+      required: ["title", "body"],
+    },
+  },
+];
+
 export const ALL_TOOLS: Record<string, ToolDefinition[]> = {
   aws: AWS_TOOLS,
   gcp: GCP_TOOLS,
@@ -531,9 +589,11 @@ export const ALL_TOOLS: Record<string, ToolDefinition[]> = {
   github: GITHUB_TOOLS,
   gitlab: GITLAB_TOOLS,
   teams: TEAMS_TOOLS,
+  slack: SLACK_TOOLS,
+  google_chat: GOOGLE_CHAT_TOOLS,
 };
 
-export function getToolsForProvider(cloudProvider: "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams"): ToolDefinition[] {
+export function getToolsForProvider(cloudProvider: "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "slack" | "google_chat"): ToolDefinition[] {
   return ALL_TOOLS[cloudProvider] ?? [];
 }
 
@@ -594,10 +654,10 @@ export function getToolByName(name: string): ToolDefinition | undefined {
   if (name === "code_interpreter") return CODE_INTERPRETER_TOOL;
   if (name === "request_approval") return REQUEST_APPROVAL_TOOL;
   if (name === "spawn_agent") return SPAWN_AGENT_TOOL;
-  return [...AWS_TOOLS, ...GCP_TOOLS, ...AZURE_TOOLS, ...RAGFLOW_TOOLS, ...JIRA_TOOLS, ...GITHUB_TOOLS, ...GITLAB_TOOLS, ...TEAMS_TOOLS].find((t) => t.name === name);
+  return [...AWS_TOOLS, ...GCP_TOOLS, ...AZURE_TOOLS, ...RAGFLOW_TOOLS, ...JIRA_TOOLS, ...GITHUB_TOOLS, ...GITLAB_TOOLS, ...TEAMS_TOOLS, ...SLACK_TOOLS, ...GOOGLE_CHAT_TOOLS].find((t) => t.name === name);
 }
 
-export function detectProviderFromToolName(name: string): "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "sandbox" | "approval" | null {
+export function detectProviderFromToolName(name: string): "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "slack" | "google_chat" | "sandbox" | "approval" | null {
   if (name === "code_interpreter") return "sandbox";
   if (name === "request_approval") return "approval";
   if (name.startsWith("aws_")) return "aws";
@@ -608,5 +668,7 @@ export function detectProviderFromToolName(name: string): "aws" | "gcp" | "azure
   if (name.startsWith("github_")) return "github";
   if (name.startsWith("gitlab_")) return "gitlab";
   if (name.startsWith("teams_")) return "teams";
+  if (name.startsWith("slack_")) return "slack";
+  if (name.startsWith("google_chat_")) return "google_chat";
   return null;
 }

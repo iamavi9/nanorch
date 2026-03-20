@@ -396,16 +396,7 @@ export async function executeTask(taskId: string): Promise<void> {
         return;
       }
 
-      await log("info", `Heartbeat has content — dispatching alert (target: ${agent.heartbeatTarget ?? "none"})`);
-
-      const target = agent.heartbeatTarget ?? "none";
-      if (target !== "none") {
-        dispatchNotification(orchestrator.id, "heartbeat.alert", {
-          taskId,
-          agentName: agent.name,
-          summary: output.slice(0, 500),
-        }).catch(console.error);
-      }
+      await log("info", `Heartbeat has content — dispatching alert`);
 
       if ((task as any).notifyChannelId) {
         dispatchToChannel(
@@ -413,6 +404,8 @@ export async function executeTask(taskId: string): Promise<void> {
           `🔔 Heartbeat Alert — ${agent.name}`,
           output.slice(0, 500),
         ).catch(console.error);
+      } else {
+        await log("warn", "Heartbeat alert fired but no notify channel configured — set a Heartbeat Notify Channel on the agent to receive alerts");
       }
       return;
     }
@@ -568,6 +561,18 @@ async function loadCloudCredentials(
         loaded.push({
           integrationId: integration.id,
           provider: "teams",
+          credentials: { webhookUrl: raw.webhookUrl },
+        });
+      } else if (integration.provider === "slack") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "slack",
+          credentials: { botToken: raw.botToken, defaultChannel: raw.defaultChannel },
+        });
+      } else if (integration.provider === "google_chat") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "google_chat",
           credentials: { webhookUrl: raw.webhookUrl },
         });
       }

@@ -37,6 +37,14 @@ const INCREMENTAL_MIGRATIONS: Array<{ name: string; sql: string }> = [
     sql: `ALTER TYPE "cloud_provider" ADD VALUE IF NOT EXISTS 'teams'`,
   },
   {
+    name: "add_cloud_provider_slack",
+    sql: `ALTER TYPE "cloud_provider" ADD VALUE IF NOT EXISTS 'slack'`,
+  },
+  {
+    name: "add_cloud_provider_google_chat",
+    sql: `ALTER TYPE "cloud_provider" ADD VALUE IF NOT EXISTS 'google_chat'`,
+  },
+  {
     name: "add_channel_type_slack",
     sql: `ALTER TYPE "channel_type" ADD VALUE IF NOT EXISTS 'slack'`,
   },

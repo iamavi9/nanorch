@@ -14,22 +14,24 @@ import {
   Plus, Trash2, CheckCircle2, XCircle, Loader2, RefreshCw, Plug,
   ShieldCheck, CloudCog, Database, Wrench, BookOpen, Pencil, MessageSquare,
 } from "lucide-react";
-import { SiAmazon, SiGooglecloud, SiJira, SiGithub, SiGitlab } from "react-icons/si";
+import { SiAmazon, SiGooglecloud, SiJira, SiGithub, SiGitlab, SiSlack, SiGooglechat } from "react-icons/si";
 import type { CloudIntegration } from "@shared/schema";
 
 interface Props { workspaceId: string; }
 
-type Provider = "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams";
+type Provider = "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "slack" | "google_chat";
 
 const PROVIDER_META: Record<Provider, { label: string; icon: React.ElementType; color: string; bg: string; category: string }> = {
-  aws:     { label: "AWS",          icon: SiAmazon,          color: "text-orange-500",  bg: "bg-orange-500/10",   category: "Cloud" },
-  gcp:     { label: "Google Cloud", icon: SiGooglecloud,     color: "text-blue-500",    bg: "bg-blue-500/10",     category: "Cloud" },
-  azure:   { label: "Azure",        icon: CloudCog,          color: "text-sky-500",     bg: "bg-sky-500/10",      category: "Cloud" },
-  ragflow: { label: "RAGFlow",      icon: Database,          color: "text-violet-500",  bg: "bg-violet-500/10",   category: "Knowledge" },
-  jira:    { label: "Jira",         icon: SiJira,            color: "text-blue-600",    bg: "bg-blue-600/10",     category: "DevTools" },
-  github:  { label: "GitHub",       icon: SiGithub,          color: "text-gray-300",    bg: "bg-gray-500/10",     category: "DevTools" },
-  gitlab:  { label: "GitLab",       icon: SiGitlab,          color: "text-orange-400",  bg: "bg-orange-400/10",   category: "DevTools" },
-  teams:   { label: "MS Teams",     icon: MessageSquare,     color: "text-indigo-500",  bg: "bg-indigo-500/10",   category: "Messaging" },
+  aws:         { label: "AWS",          icon: SiAmazon,          color: "text-orange-500",  bg: "bg-orange-500/10",   category: "Cloud" },
+  gcp:         { label: "Google Cloud", icon: SiGooglecloud,     color: "text-blue-500",    bg: "bg-blue-500/10",     category: "Cloud" },
+  azure:       { label: "Azure",        icon: CloudCog,          color: "text-sky-500",     bg: "bg-sky-500/10",      category: "Cloud" },
+  ragflow:     { label: "RAGFlow",      icon: Database,          color: "text-violet-500",  bg: "bg-violet-500/10",   category: "Knowledge" },
+  jira:        { label: "Jira",         icon: SiJira,            color: "text-blue-600",    bg: "bg-blue-600/10",     category: "DevTools" },
+  github:      { label: "GitHub",       icon: SiGithub,          color: "text-gray-300",    bg: "bg-gray-500/10",     category: "DevTools" },
+  gitlab:      { label: "GitLab",       icon: SiGitlab,          color: "text-orange-400",  bg: "bg-orange-400/10",   category: "DevTools" },
+  teams:       { label: "MS Teams",     icon: MessageSquare,     color: "text-indigo-500",  bg: "bg-indigo-500/10",   category: "Messaging" },
+  slack:       { label: "Slack",        icon: SiSlack,           color: "text-green-500",   bg: "bg-green-500/10",    category: "Messaging" },
+  google_chat: { label: "Google Chat",  icon: SiGooglechat,      color: "text-blue-400",    bg: "bg-blue-400/10",     category: "Messaging" },
 };
 
 type SafeIntegration = Omit<CloudIntegration, "credentialsEncrypted"> & { credentialsMeta?: Record<string, string> };
@@ -55,25 +57,29 @@ function ModeSelector({ value, onChange }: { value: "tool" | "context"; onChange
 }
 
 const EMPTY_CREDS: Record<Provider, Record<string, string>> = {
-  aws:     { accessKeyId: "", secretAccessKey: "", region: "us-east-1" },
-  gcp:     { serviceAccountJson: "" },
-  azure:   { clientId: "", clientSecret: "", tenantId: "", subscriptionId: "" },
-  ragflow: { baseUrl: "", apiKey: "" },
-  jira:    { baseUrl: "", email: "", apiToken: "", defaultProjectKey: "" },
-  github:  { token: "", defaultOwner: "" },
-  gitlab:  { baseUrl: "https://gitlab.com", token: "", defaultProjectId: "" },
-  teams:   { webhookUrl: "" },
+  aws:         { accessKeyId: "", secretAccessKey: "", region: "us-east-1" },
+  gcp:         { serviceAccountJson: "" },
+  azure:       { clientId: "", clientSecret: "", tenantId: "", subscriptionId: "" },
+  ragflow:     { baseUrl: "", apiKey: "" },
+  jira:        { baseUrl: "", email: "", apiToken: "", defaultProjectKey: "" },
+  github:      { token: "", defaultOwner: "" },
+  gitlab:      { baseUrl: "https://gitlab.com", token: "", defaultProjectId: "" },
+  teams:       { webhookUrl: "" },
+  slack:       { botToken: "", defaultChannel: "" },
+  google_chat: { webhookUrl: "" },
 };
 
 const REQUIRED_FIELDS: Record<Provider, string[]> = {
-  aws:     ["accessKeyId", "secretAccessKey"],
-  gcp:     ["serviceAccountJson"],
-  azure:   ["clientId", "clientSecret", "tenantId", "subscriptionId"],
-  ragflow: ["baseUrl", "apiKey"],
-  jira:    ["baseUrl", "email", "apiToken"],
-  github:  ["token"],
-  gitlab:  ["baseUrl", "token"],
-  teams:   ["webhookUrl"],
+  aws:         ["accessKeyId", "secretAccessKey"],
+  gcp:         ["serviceAccountJson"],
+  azure:       ["clientId", "clientSecret", "tenantId", "subscriptionId"],
+  ragflow:     ["baseUrl", "apiKey"],
+  jira:        ["baseUrl", "email", "apiToken"],
+  github:      ["token"],
+  gitlab:      ["baseUrl", "token"],
+  teams:       ["webhookUrl"],
+  slack:       ["botToken"],
+  google_chat: ["webhookUrl"],
 };
 
 const FIELD_LABELS: Record<string, string> = {
@@ -83,6 +89,8 @@ const FIELD_LABELS: Record<string, string> = {
   baseUrl: "Base URL", apiKey: "API Key",
   email: "Email", apiToken: "API Token",
   token: "Token",
+  botToken: "Bot Token", defaultChannel: "Default Channel",
+  webhookUrl: "Webhook URL",
 };
 
 function validateRequiredCreds(provider: Provider, creds: Record<string, string>): string | null {
@@ -195,6 +203,32 @@ function CredentialFields({ provider, creds, onChange }: {
         <Input placeholder="https://xxx.webhook.office.com/webhookb2/..." value={creds.webhookUrl} onChange={(e) => set("webhookUrl", e.target.value)} data-testid="input-teams-webhook" />
         <p className="text-xs text-muted-foreground">
           In Teams, go to the channel → ··· → Connectors → Incoming Webhook → Configure. Copy the webhook URL and paste it here.
+        </p>
+      </div>
+    </div>
+  );
+
+  if (provider === "slack") return (
+    <div className="space-y-3">
+      <div className="space-y-1.5"><Label>Bot Token</Label>
+        <Input type="password" placeholder="xoxb-xxxxxxxxxxxx-xxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxx" value={creds.botToken} onChange={(e) => set("botToken", e.target.value)} data-testid="input-slack-token" />
+        <p className="text-xs text-muted-foreground">
+          Create a Slack app at api.slack.com/apps → OAuth &amp; Permissions → Bot Token Scopes: add <code>chat:write</code> → Install to Workspace → copy the Bot User OAuth Token.
+        </p>
+      </div>
+      <div className="space-y-1.5"><Label>Default Channel <span className="text-muted-foreground font-normal">(optional)</span></Label>
+        <Input placeholder="C012AB3CD or #general" value={creds.defaultChannel} onChange={(e) => set("defaultChannel", e.target.value)} data-testid="input-slack-channel" />
+        <p className="text-xs text-muted-foreground">Slack channel ID or name used when the agent doesn't specify one. The bot must be invited to this channel.</p>
+      </div>
+    </div>
+  );
+
+  if (provider === "google_chat") return (
+    <div className="space-y-3">
+      <div className="space-y-1.5"><Label>Incoming Webhook URL</Label>
+        <Input placeholder="https://chat.googleapis.com/v1/spaces/..." value={creds.webhookUrl} onChange={(e) => set("webhookUrl", e.target.value)} data-testid="input-google-chat-webhook" />
+        <p className="text-xs text-muted-foreground">
+          In Google Chat, open a Space → Apps &amp; Integrations → Webhooks → Add Webhook. Copy the URL and paste it here.
         </p>
       </div>
     </div>
@@ -376,7 +410,7 @@ export default function IntegrationsPage({ workspaceId }: Props) {
     Cloud: integrations.filter((i) => ["aws", "gcp", "azure"].includes(i.provider)),
     DevTools: integrations.filter((i) => ["jira", "github", "gitlab"].includes(i.provider)),
     Knowledge: integrations.filter((i) => i.provider === "ragflow"),
-    Messaging: integrations.filter((i) => ["teams"].includes(i.provider)),
+    Messaging: integrations.filter((i) => ["teams", "slack", "google_chat"].includes(i.provider)),
   };
 
   return (
@@ -408,6 +442,8 @@ export default function IntegrationsPage({ workspaceId }: Props) {
                     <SelectItem value="github">GitHub</SelectItem>
                     <SelectItem value="gitlab">GitLab</SelectItem>
                     <SelectItem value="teams">MS Teams</SelectItem>
+                    <SelectItem value="slack">Slack</SelectItem>
+                    <SelectItem value="google_chat">Google Chat</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

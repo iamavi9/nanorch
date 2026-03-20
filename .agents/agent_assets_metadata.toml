@@ -12,3 +12,9 @@ id = "8AT9Yi904ayIadUQbl2SM"
 uri = "file://NanoOrch_User_Manual.docx"
 type = "word_document"
 title = "NanoOrch User Manual (updated)"
+
+[[outputs]]
+id = "ziWosrvezOFgbEeFWi8V2"
+uri = "file://client/public/NanoOrch-Architecture.pptx"
+type = "slides"
+title = "NanoOrch Architecture — C-Suite Deck (PPTX)"
