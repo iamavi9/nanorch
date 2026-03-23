@@ -8,6 +8,7 @@ import { executeCloudTool, type CloudCredentials } from "../cloud/executor";
 import { getToolsForProvider, detectProviderFromToolName, CODE_INTERPRETER_TOOL, REQUEST_APPROVAL_TOOL, SPAWN_AGENT_TOOL } from "../cloud/tools";
 import { sanitizeToolArgs } from "../lib/mountAllowlist";
 import { isDockerAvailable, executeTaskInDocker } from "./docker-executor";
+import { isK3sAvailable, executeTaskInK3s } from "./k3s-executor";
 import { runCode } from "./sandbox-executor";
 import { dispatchNotification, dispatchToChannel } from "./notifier";
 import { dispatchCommsReply } from "../comms/comms-reply";
@@ -57,13 +58,15 @@ async function runAgentWithFailover(
 const MAX_TOOL_ROUNDS = 10;
 
 export async function executeTask(taskId: string): Promise<void> {
-  const taskCheck = await storage.getTask(taskId);
-  if (isDockerAvailable() && taskCheck?.intent === "action") {
-    return executeTaskInDocker(taskId);
-  }
-
   const task = await storage.getTask(taskId);
   if (!task) throw new Error(`Task ${taskId} not found`);
+
+  if (isK3sAvailable() && task.intent === "action") {
+    return executeTaskInK3s(taskId);
+  }
+  if (isDockerAvailable() && task.intent === "action") {
+    return executeTaskInDocker(taskId);
+  }
 
   const orchestrator = await storage.getOrchestrator(task.orchestratorId);
   if (!orchestrator) throw new Error(`Orchestrator not found`);
@@ -358,7 +361,7 @@ export async function executeTask(taskId: string): Promise<void> {
         workspaceId: orchestrator.workspaceId,
         taskId,
         agentId: agent?.id ?? null,
-        agentName: agent?.name ?? null,
+        agentName: agent?.name ?? `${orchestrator.name} (direct)`,
         provider: orchestrator.provider,
         model: orchestrator.model,
         inputTokens: totalInputTokens,
@@ -574,6 +577,16 @@ async function loadCloudCredentials(
           integrationId: integration.id,
           provider: "google_chat",
           credentials: { webhookUrl: raw.webhookUrl },
+        });
+      } else if (integration.provider === "servicenow") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "servicenow",
+          credentials: {
+            instanceUrl: raw.instanceUrl,
+            username: raw.username,
+            password: raw.password,
+          },
         });
       }
     } catch {

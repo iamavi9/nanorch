@@ -64,6 +64,12 @@ export interface GoogleChatCredentials {
   webhookUrl: string;
 }
 
+export interface ServiceNowCredentials {
+  instanceUrl: string;
+  username: string;
+  password: string;
+}
+
 export type CloudCredentials =
   | { provider: "aws"; credentials: AWSCredentials }
   | { provider: "gcp"; credentials: GCPCredentials }
@@ -74,7 +80,8 @@ export type CloudCredentials =
   | { provider: "gitlab"; credentials: GitLabCredentials }
   | { provider: "teams"; credentials: TeamsCredentials }
   | { provider: "slack"; credentials: SlackCredentials }
-  | { provider: "google_chat"; credentials: GoogleChatCredentials };
+  | { provider: "google_chat"; credentials: GoogleChatCredentials }
+  | { provider: "servicenow"; credentials: ServiceNowCredentials };
 
 export async function validateCredentials(creds: CloudCredentials): Promise<{ ok: boolean; detail: string }> {
   try {
@@ -213,6 +220,22 @@ export async function validateCredentials(creds: CloudCredentials): Promise<{ ok
       if (!res.ok) throw new Error(`Google Chat webhook responded with ${res.status}`);
       return { ok: true, detail: "Google Chat webhook is reachable and accepting messages" };
     }
+    if (creds.provider === "servicenow") {
+      const { instanceUrl, username, password } = creds.credentials;
+      if (!instanceUrl) throw new Error("ServiceNow Instance URL is required");
+      if (!username) throw new Error("ServiceNow username is required");
+      if (!password) throw new Error("ServiceNow password is required");
+      const base = instanceUrl.replace(/\/$/, "");
+      const auth = Buffer.from(`${username}:${password}`).toString("base64");
+      const res = await fetch(`${base}/api/now/table/sys_user?sysparm_query=user_name=${encodeURIComponent(username)}&sysparm_limit=1&sysparm_fields=user_name,name,email`, {
+        headers: { Authorization: `Basic ${auth}`, Accept: "application/json" },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`ServiceNow responded with ${res.status} — check instance URL and credentials`);
+      const data = await res.json() as any;
+      const user = data?.result?.[0];
+      return { ok: true, detail: `Connected to ${base} as ${user?.name ?? username} (${user?.email ?? "no email"})` };
+    }
     return { ok: false, detail: "Unknown provider" };
   } catch (err: any) {
     return { ok: false, detail: err?.message ?? String(err) };
@@ -253,6 +276,9 @@ export async function executeCloudTool(
   }
   if (creds.provider === "google_chat") {
     return executeGoogleChatTool(toolName, toolArgs, creds.credentials);
+  }
+  if (creds.provider === "servicenow") {
+    return executeServiceNowTool(toolName, toolArgs, creds.credentials);
   }
   throw new Error(`Unknown cloud provider`);
 }
@@ -923,6 +949,179 @@ async function executeGoogleChatTool(name: string, args: Record<string, string>,
   }
 
   throw new Error(`Unknown Google Chat tool: ${name}`);
+}
+
+async function executeServiceNowTool(name: string, args: Record<string, string>, creds: ServiceNowCredentials): Promise<unknown> {
+  const base = creds.instanceUrl.replace(/\/$/, "");
+  const auth = Buffer.from(`${creds.username}:${creds.password}`).toString("base64");
+  const headers = {
+    Authorization: `Basic ${auth}`,
+    Accept: "application/json",
+    "Content-Type": "application/json",
+  };
+
+  const snFetch = async (path: string, init?: RequestInit) => {
+    const res = await fetch(`${base}${path}`, { ...init, headers: { ...headers, ...(init?.headers ?? {}) }, signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`ServiceNow ${path} responded with ${res.status} — ${text.slice(0, 300)}`);
+    }
+    return res.json();
+  };
+
+  const isLikeSysId = (id: string) => /^[0-9a-f]{32}$/i.test(id);
+
+  if (name === "servicenow_search_records") {
+    const limit = Math.min(parseInt(args.limit ?? "10") || 10, 50);
+    const fields = args.fields ? `&sysparm_fields=${encodeURIComponent(args.fields)}` : "";
+    const data = await snFetch(
+      `/api/now/table/${encodeURIComponent(args.table)}?sysparm_query=${encodeURIComponent(args.query)}&sysparm_limit=${limit}&sysparm_display_value=true${fields}`
+    ) as any;
+    return { table: args.table, count: data.result?.length ?? 0, records: data.result ?? [] };
+  }
+
+  if (name === "servicenow_get_incident") {
+    const id = args.identifier;
+    const query = isLikeSysId(id) ? `sys_id=${id}` : `number=${id}`;
+    const data = await snFetch(
+      `/api/now/table/incident?sysparm_query=${query}&sysparm_limit=1&sysparm_display_value=true` +
+      `&sysparm_fields=number,sys_id,short_description,description,state,urgency,impact,priority,category,` +
+      `assignment_group,assigned_to,caller_id,work_notes,opened_at,resolved_at,close_notes`
+    ) as any;
+    const record = data.result?.[0];
+    if (!record) throw new Error(`Incident not found: ${id}`);
+    return record;
+  }
+
+  if (name === "servicenow_create_incident") {
+    const body: Record<string, unknown> = {
+      short_description: args.short_description,
+      ...(args.description ? { description: args.description } : {}),
+      ...(args.urgency ? { urgency: args.urgency } : {}),
+      ...(args.impact ? { impact: args.impact } : {}),
+      ...(args.category ? { category: args.category } : {}),
+      ...(args.assignment_group ? { assignment_group: args.assignment_group } : {}),
+      ...(args.caller_id ? { caller_id: args.caller_id } : {}),
+      ...(args.work_notes ? { work_notes: args.work_notes } : {}),
+    };
+    const data = await snFetch("/api/now/table/incident", { method: "POST", body: JSON.stringify(body) }) as any;
+    const rec = data.result;
+    return { number: rec.number, sys_id: rec.sys_id, link: `${base}/nav_to.do?uri=incident.do?sys_id=${rec.sys_id}` };
+  }
+
+  if (name === "servicenow_update_record") {
+    let fields: Record<string, unknown>;
+    try { fields = JSON.parse(args.fields); } catch { throw new Error(`fields must be a valid JSON object string`); }
+    await snFetch(`/api/now/table/${encodeURIComponent(args.table)}/${args.sys_id}`, {
+      method: "PATCH",
+      body: JSON.stringify(fields),
+    });
+    return { updated: true, table: args.table, sys_id: args.sys_id, fields_updated: Object.keys(fields) };
+  }
+
+  if (name === "servicenow_add_work_note") {
+    await snFetch(`/api/now/table/${encodeURIComponent(args.table)}/${args.sys_id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ work_notes: args.work_note }),
+    });
+    return { added: true, table: args.table, sys_id: args.sys_id };
+  }
+
+  if (name === "servicenow_get_ritm") {
+    const id = args.identifier;
+    const query = isLikeSysId(id) ? `sys_id=${id}` : `number=${id}`;
+    const data = await snFetch(
+      `/api/now/table/sc_req_item?sysparm_query=${query}&sysparm_limit=1&sysparm_display_value=true` +
+      `&sysparm_fields=number,sys_id,short_description,stage,state,cat_item,request,requested_for,assignment_group,opened_at`
+    ) as any;
+    const record = data.result?.[0];
+    if (!record) throw new Error(`RITM not found: ${id}`);
+    const ritmSysId = isLikeSysId(id) ? id : record.sys_id;
+    let variables: unknown[] = [];
+    try {
+      const varData = await snFetch(`/api/now/table/sc_item_option_mtom?sysparm_query=request_item=${ritmSysId}&sysparm_display_value=true&sysparm_fields=sc_item_option`) as any;
+      const varSysIds: string[] = (varData.result ?? []).map((r: any) => r.sc_item_option?.value).filter(Boolean);
+      if (varSysIds.length > 0) {
+        const optData = await snFetch(`/api/now/table/sc_item_option?sysparm_query=sys_id=${varSysIds.join("^ORsys_id=")}&sysparm_display_value=true&sysparm_fields=item_option,value`) as any;
+        variables = (optData.result ?? []).map((v: any) => ({ name: v.item_option?.display_value ?? v.item_option?.value, value: v.value }));
+      }
+    } catch { }
+    return { ...record, variables };
+  }
+
+  if (name === "servicenow_create_ritm") {
+    const catalogSysId = args.catalog_item_sys_id;
+    let variables: Record<string, string> = {};
+    if (args.variables) {
+      try { variables = JSON.parse(args.variables); } catch { throw new Error(`variables must be a valid JSON object string`); }
+    }
+    const body: Record<string, unknown> = {
+      sysparm_quantity: args.quantity ?? "1",
+      variables,
+      ...(args.requested_for ? { requested_for: args.requested_for } : {}),
+    };
+    const data = await snFetch(`/api/sn_sc/servicecatalog/items/${encodeURIComponent(catalogSysId)}/order_now`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }) as any;
+    const reqResult = data.result ?? data;
+    const reqNumber = reqResult.request_number ?? reqResult.number;
+    const reqSysId = reqResult.request_id?.value ?? reqResult.sys_id;
+    let ritmNumber: string | undefined;
+    let ritmSysId: string | undefined;
+    if (reqSysId) {
+      try {
+        const ritmData = await snFetch(`/api/now/table/sc_req_item?sysparm_query=request=${reqSysId}&sysparm_limit=1&sysparm_fields=number,sys_id`) as any;
+        ritmNumber = ritmData.result?.[0]?.number;
+        ritmSysId = ritmData.result?.[0]?.sys_id;
+      } catch { }
+    }
+    return {
+      request_number: reqNumber,
+      request_sys_id: reqSysId,
+      ritm_number: ritmNumber,
+      ritm_sys_id: ritmSysId,
+      link: reqSysId ? `${base}/nav_to.do?uri=sc_request.do?sys_id=${reqSysId}` : undefined,
+    };
+  }
+
+  if (name === "servicenow_create_change_request") {
+    const body: Record<string, unknown> = {
+      short_description: args.short_description,
+      ...(args.description ? { description: args.description } : {}),
+      ...(args.type ? { type: args.type } : {}),
+      ...(args.assignment_group ? { assignment_group: args.assignment_group } : {}),
+      ...(args.risk ? { risk: args.risk } : {}),
+      ...(args.start_date ? { start_date: args.start_date } : {}),
+      ...(args.end_date ? { end_date: args.end_date } : {}),
+    };
+    const data = await snFetch("/api/now/table/change_request", { method: "POST", body: JSON.stringify(body) }) as any;
+    const rec = data.result;
+    return { number: rec.number, sys_id: rec.sys_id, link: `${base}/nav_to.do?uri=change_request.do?sys_id=${rec.sys_id}` };
+  }
+
+  if (name === "servicenow_get_catalog_items") {
+    const limit = Math.min(parseInt(args.limit ?? "20") || 20, 50);
+    const queryParts = ["active=true"];
+    if (args.search) queryParts.push(`nameLIKE${args.search}`);
+    if (args.category) queryParts.push(`category.nameLIKE${args.category}`);
+    const data = await snFetch(
+      `/api/now/table/sc_cat_item?sysparm_query=${encodeURIComponent(queryParts.join("^"))}` +
+      `&sysparm_limit=${limit}&sysparm_display_value=true&sysparm_fields=sys_id,name,short_description,category,active`
+    ) as any;
+    return {
+      count: data.result?.length ?? 0,
+      items: (data.result ?? []).map((item: any) => ({
+        sys_id: item.sys_id,
+        name: item.name,
+        short_description: item.short_description,
+        category: item.category?.display_value ?? item.category,
+        active: item.active,
+      })),
+    };
+  }
+
+  throw new Error(`Unknown ServiceNow tool: ${name}`);
 }
 
 export async function retrieveRAGFlowContext(

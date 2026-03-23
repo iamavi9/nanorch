@@ -85,6 +85,17 @@ else
   info "Created admin_password.txt"
 fi
 
+# ── k3s_token ─────────────────────────────────────────────────────────────────
+# Used by the K3s server to authenticate cluster nodes.
+# Only needed when running with docker-compose.k3s.yml.
+# Never exposed as an environment variable — read from the secret file at runtime.
+if [[ -f "$SECRETS_DIR/k3s_token.txt" ]]; then
+  warn "k3s_token.txt already exists — skipping"
+else
+  printf '%s' "$(openssl rand -hex 32)" > "$SECRETS_DIR/k3s_token.txt"
+  info "Generated k3s_token.txt"
+fi
+
 # ── AI provider keys ──────────────────────────────────────────────────────────
 echo ""
 echo "  AI provider API keys (press Enter to skip a provider)"

@@ -25,6 +25,7 @@ import MemberChatPage from "@/pages/MemberChatPage";
 import AppLayout from "@/components/AppLayout";
 import SSOPage from "@/pages/SSOPage";
 import TriggersPage from "@/pages/TriggersPage";
+import McpPage from "@/pages/McpPage";
 import { useAuth } from "@/hooks/useAuth";
 
 function AuthGuard({
@@ -169,6 +170,15 @@ function Router() {
           <AuthGuard adminOnly workspaceId={params.wid}>
             <AppLayout workspaceId={params.wid}>
               <IntegrationsPage workspaceId={params.wid} />
+            </AppLayout>
+          </AuthGuard>
+        )}
+      </Route>
+      <Route path="/workspaces/:wid/mcp">
+        {(params) => (
+          <AuthGuard adminOnly workspaceId={params.wid}>
+            <AppLayout workspaceId={params.wid}>
+              <McpPage workspaceId={params.wid} />
             </AppLayout>
           </AuthGuard>
         )}

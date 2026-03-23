@@ -29,6 +29,7 @@ A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, 
 - **RAGFlow integration** — query knowledge bases as a tool, or auto-inject context before every AI response (Context mode)
 - **Intent classification** — LLM-based classifier routes each message to action / code execution / conversational path automatically
 - **Chat UI** — per-workspace chat with `@agent` mention autocomplete (keyboard ↑↓ navigation, Enter/Tab to select) and live streaming responses
+- **MCP Server** — HTTP/SSE Model Context Protocol server at `/mcp`; workspace admins create API keys (`nano_mcp_...`) from the **MCP** page; 8 tools (`list_orchestrators`, `list_agents`, `run_task`, `get_task_status`, `list_pending_approvals`, `approve_request`, `trigger_pipeline`, `fire_scheduled_job`) let Claude Desktop or any MCP-compatible client remotely control the workspace
 - **Collapsible sidebar** — workspace sidebar collapses to a 60 px icon-only rail; icons are clickable with hover tooltips; preference persists in localStorage
 - **Member chat interface** — clean chat page at `/chat/:slug` for end-users (no admin UI visible)
 
@@ -656,6 +657,7 @@ Every secret variable below also accepts a companion `<NAME>_FILE` variant. When
 | `SANDBOX_RUNTIME` | — | No | `runsc` | OCI runtime for **code-execution sandbox** containers (`runsc` = gVisor, `runc` = standard Docker) |
 | `AGENT_RUNTIME` | — | No | `runc` | OCI runtime for **agent action-task** containers (`runsc` = gVisor, blank = Docker default) |
 | `SECCOMP_PROFILE` | — | No | — | Absolute host path to a custom seccomp JSON profile; applied to both agent and sandbox containers. A hardened profile is included at `agent/seccomp/nanoorch.json` |
+| `DOCKER_PROXY_URL` | — | No | `http://host.docker.internal:3000/internal/proxy` | Inference proxy URL used by agent containers. Override if action tasks show "Connection error" (e.g. Docker Engine < 20.10): `http://172.17.0.1:3000/internal/proxy` |
 | `COOKIE_SECURE` | — | No | `false` | Set `true` when behind an HTTPS reverse proxy (nginx/ALB); leave `false` for plain HTTP |
 | `APP_PORT` | — | No | `3000` | Host port to expose |
 
@@ -743,6 +745,7 @@ docker build -t nanoorch-sandbox:latest ./agent/sandbox
 | `SANDBOX_RUNTIME` | `runsc` | OCI runtime for sandbox containers — `runsc` for gVisor, `runc` for standard Docker |
 | `AGENT_RUNTIME` | _(blank)_ | OCI runtime for agent action-task containers — `runsc` to enable gVisor for those too |
 | `SECCOMP_PROFILE` | _(blank)_ | Absolute host path to a custom seccomp JSON profile (applied to both agent and sandbox containers). A hardened profile is at `agent/seccomp/nanoorch.json` |
+| `DOCKER_PROXY_URL` | `http://host.docker.internal:3000/internal/proxy` | URL agent containers use to reach the NanoOrch inference proxy. If action tasks fail with "Connection error", set to `http://172.17.0.1:3000/internal/proxy` (requires Docker Engine ≥ 20.10 for the default to work) |
 
 Set `SANDBOX_RUNTIME=runc` if gVisor is not installed. Code execution still works — you just lose the extra kernel-level isolation. Set `AGENT_RUNTIME=runsc` to apply gVisor to action-task agent containers as well.
 
@@ -1049,5 +1052,14 @@ Multiple agents in the same workspace can each target a different Jira project. 
 | `POST` | `/api/channels/:id/webhook` | Submit a task from an external system (API/Webhook channels) |
 | `POST` | `/api/channels/:id/slack/events` | Slack Event Subscriptions endpoint — handles `url_verification` challenge and `app_mention` / `message` events; HMAC-SHA256 signature verified |
 | `POST` | `/api/channels/:id/teams/events` | Microsoft Teams Bot Framework endpoint — verifies the Bearer JWT from Azure, parses `message` activities, routes to agent |
+
+### MCP Server (Bearer API key)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/workspaces/:id/mcp-keys` | List MCP API keys for a workspace |
+| `POST` | `/api/workspaces/:id/mcp-keys` | Create an MCP API key (raw key returned once, stored as SHA-256 hash) |
+| `DELETE` | `/api/mcp-keys/:id` | Revoke an MCP API key |
+| `POST/GET/DELETE` | `/mcp` | MCP HTTP/SSE endpoint — authenticate with `Authorization: Bearer nano_mcp_...` |
 
 ---

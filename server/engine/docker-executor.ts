@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { existsSync } from "fs";
 import * as readline from "readline";
 import { storage } from "../storage";
 import { decrypt } from "../lib/encryption";
@@ -22,6 +23,7 @@ const AGENT_RUNTIME = process.env.AGENT_RUNTIME ?? "";
 export function isDockerAvailable(): boolean {
   return !!process.env.DOCKER_SOCKET;
 }
+
 
 type LoadedCredential = CloudCredentials & { integrationId: string };
 
@@ -182,10 +184,21 @@ export async function executeTaskInDocker(taskId: string): Promise<void> {
     });
   } catch (err: any) {
     const message = err?.message ?? String(err);
-    await log("error", `Task failed in sandbox: ${message}`);
+    // "Connection error." is the OpenAI SDK's APIConnectionError — the agent
+    // container could not reach the inference proxy.  Emit a hint that includes
+    // the resolved proxy base URL so the operator knows what to check.
+    const isConnErr = /^connection error\.?$/i.test(message.trim());
+    const _hintRaw = process.env.DOCKER_PROXY_URL?.trim();
+    const _hintProxy = _hintRaw
+      ? _hintRaw.replace(/\/$/, "")
+      : `http://host.docker.internal:${process.env.PORT ?? "5000"}/internal/proxy`;
+    const hint = isConnErr
+      ? ` — agent container could not reach the inference proxy. Check that DOCKER_PROXY_URL (currently: ${_hintProxy}) is reachable from spawned containers. On Docker Engine < 20.10, set DOCKER_PROXY_URL explicitly (e.g. http://172.17.0.1:${process.env.PORT ?? "5000"}/internal/proxy).`
+      : "";
+    await log("error", `Task failed in sandbox: ${message}${hint}`);
     await storage.updateTask(taskId, {
       status: "failed",
-      errorMessage: message,
+      errorMessage: message + (isConnErr ? " (inference proxy unreachable — see server logs)" : ""),
       completedAt: new Date(),
     });
   } finally {
@@ -218,10 +231,16 @@ async function runInContainer(opts: {
   const toolsB64 = Buffer.from(JSON.stringify(tools)).toString("base64");
 
   // Determine the inference proxy base URL.
-  // Agent containers reach the NanoOrch host via the special hostname
-  // host.docker.internal (resolved via --add-host below).
+  // Override with DOCKER_PROXY_URL if set to a non-empty value (useful when
+  // host.docker.internal does not resolve — e.g. Docker Engine < 20.10 or
+  // custom network topologies).
+  // Default: agent containers reach NanoOrch via host.docker.internal resolved
+  // by --add-host host.docker.internal:host-gateway below.
   const hostPort = process.env.PORT ?? "5000";
-  const proxyBase = `http://host.docker.internal:${hostPort}/internal/proxy`;
+  const rawProxyUrl = process.env.DOCKER_PROXY_URL?.trim();
+  const proxyBase = rawProxyUrl
+    ? rawProxyUrl.replace(/\/$/, "")
+    : `http://host.docker.internal:${hostPort}/internal/proxy`;
 
   // The container receives a short-lived task token instead of real API keys.
   // The inference proxy on the host verifies the token and injects the real
@@ -269,7 +288,9 @@ async function runInContainer(opts: {
       : []),
     // Optional custom seccomp profile (host path).
     ...(process.env.SECCOMP_PROFILE
-      ? ["--security-opt", `seccomp=${process.env.SECCOMP_PROFILE}`]
+      ? existsSync(process.env.SECCOMP_PROFILE)
+        ? ["--security-opt", `seccomp=${process.env.SECCOMP_PROFILE}`]
+        : (console.warn(`[agent] SECCOMP_PROFILE is set but file not found at ${process.env.SECCOMP_PROFILE} — seccomp disabled. Copy agent/seccomp/nanoorch.json to that path.`), [])
       : []),
     ...envArgs,
     agentImage,

@@ -17,4 +17,16 @@ title = "NanoOrch User Manual (updated)"
 id = "ziWosrvezOFgbEeFWi8V2"
 uri = "file://client/public/NanoOrch-Architecture.pptx"
 type = "slides"
-title = "NanoOrch Architecture — C-Suite Deck (PPTX)"
+title = "NanoOrch-Architecture.pptx — typos corrected"
+
+[[outputs]]
+id = "ylKVs_BwrstQ65LWft4kS"
+uri = "file://docs/screenshots/nanoorch-architecture_1774022201704.png"
+type = "image"
+title = "NanoOrch Architecture Diagram (PNG)"
+
+[[outputs]]
+id = "eTgPilW2czB3kVQlv1_O6"
+uri = "file://client/public/NanoOrch-CambridgeTech.pptx"
+type = "slides"
+title = "NanoOrch — Cambridge Technology Template"

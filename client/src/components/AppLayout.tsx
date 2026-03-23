@@ -69,6 +69,7 @@ export default function AppLayout({ workspaceId, children }: AppLayoutProps) {
     { label: "Chat",           icon: MessageSquare,   path: `${basePath}/chat` },
     { label: "Members",        icon: Users,           path: `${basePath}/members` },
     { label: "Integrations",   icon: Plug,            path: `${basePath}/integrations` },
+    { label: "MCP",            icon: Zap,             path: `${basePath}/mcp` },
     { label: "Scheduled Jobs", icon: Clock,           path: `${basePath}/scheduled-jobs` },
     { label: "Pipelines",      icon: GitBranch,       path: `${basePath}/pipelines`,     badge: null },
     { label: "Triggers",       icon: Webhook,         path: `${basePath}/triggers`,      badge: null },

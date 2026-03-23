@@ -8,8 +8,22 @@ const heartbeatJobs = new Map<string, ReturnType<typeof cron.schedule>>();
 function minutesToCron(minutes: number): string {
   if (minutes <= 0) return "";
   if (minutes < 60) return `*/${minutes} * * * *`;
-  const hours = Math.floor(minutes / 60);
-  return `0 */${hours} * * *`;
+
+  // For hour-aligned intervals use the clean form
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return `0 */${hours} * * *`;
+  }
+
+  // Non-hour-aligned intervals (e.g. 90 min) cannot be expressed precisely in
+  // standard 5-field cron.  Round to the nearest whole hour and warn so
+  // operators know to use clean multiples (30, 60, 120, 240 …).
+  const rounded = Math.max(1, Math.round(minutes / 60));
+  console.warn(
+    `[heartbeat] Interval ${minutes}m is not a clean multiple of 60 — ` +
+    `rounding to ${rounded}h. Use 30, 60, 120, 180 … minute intervals for exact scheduling.`
+  );
+  return `0 */${rounded} * * *`;
 }
 
 async function fireHeartbeat(agentId: string): Promise<string | null> {
@@ -92,7 +106,16 @@ export async function fireHeartbeatNow(agentId: string): Promise<string> {
   if (!agent.heartbeatEnabled) throw new Error("Heartbeat is not enabled for this agent");
 
   const taskId = await fireHeartbeat(agentId);
-  return taskId ?? "";
+  if (!taskId) {
+    // fireHeartbeat returns null when the orchestrator is paused — surface
+    // that clearly instead of returning an empty string the caller can't act on.
+    const orchestrator = await storage.getOrchestrator(agent.orchestratorId);
+    const reason = orchestrator?.status === "paused"
+      ? "Orchestrator is paused — unpause it before firing a heartbeat"
+      : "Heartbeat could not be fired (agent may be disabled)";
+    throw new Error(reason);
+  }
+  return taskId;
 }
 
 export async function startHeartbeats() {

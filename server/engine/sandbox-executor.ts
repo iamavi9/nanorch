@@ -65,7 +65,9 @@ export async function executeCodeInSandbox(
     // If the operator has supplied a host-path to a seccomp profile, apply it.
     // Example: SECCOMP_PROFILE=/etc/nanoorch/seccomp/nanoorch.json
     ...(process.env.SECCOMP_PROFILE
-      ? ["--security-opt", `seccomp=${process.env.SECCOMP_PROFILE}`]
+      ? existsSync(process.env.SECCOMP_PROFILE)
+        ? ["--security-opt", `seccomp=${process.env.SECCOMP_PROFILE}`]
+        : (console.warn(`[sandbox] SECCOMP_PROFILE is set but file not found at ${process.env.SECCOMP_PROFILE} — seccomp disabled. Copy agent/seccomp/nanoorch.json to that path.`), [])
       : []),
     "-e", `LANGUAGE=${language}`,
     "-e", `CODE_B64=${codeB64}`,
@@ -199,14 +201,72 @@ export async function executeCodeLocally(
   });
 }
 
+/**
+ * Auto-print preprocessor — catches the common REPL-style mistake where the
+ * AI writes a bare expression on the last line (e.g. `sha256_hash` or `result`)
+ * instead of `print(sha256_hash)`.  Scripts, unlike REPLs, silently discard
+ * bare expressions.  We detect the pattern and wrap the last line with the
+ * appropriate print call so the user always sees output.
+ *
+ * Only applied to Python and JavaScript; other languages either require explicit
+ * output constructs already (Go, Java) or the AI reliably uses echo/puts/print.
+ */
+function ensureOutput(language: string, code: string): string {
+  const lang = language.toLowerCase();
+  if (lang !== "python" && lang !== "javascript" && lang !== "js") return code;
+
+  const lines = code.split("\n");
+
+  // Find the last non-blank, non-comment line
+  let lastIdx = lines.length - 1;
+  while (lastIdx >= 0 && lines[lastIdx].trim() === "") lastIdx--;
+  if (lastIdx < 0) return code;
+
+  const lastLine = lines[lastIdx];
+  const trimmed  = lastLine.trim();
+
+  // Skip lines that are already output statements or control-flow keywords
+  const PYTHON_SKIP = [
+    "print(", "print (", "import ", "from ", "def ", "class ",
+    "return ", "raise ", "if ", "elif ", "else:", "else :", "for ",
+    "while ", "try:", "except", "finally:", "with ", "assert ",
+    "del ", "pass", "break", "continue", "#", "yield ", "async ",
+  ];
+  const JS_SKIP = [
+    "console.", "process.", "return ", "throw ", "if ", "else",
+    "for ", "while ", "switch ", "break", "continue", "//",
+    "import ", "export ", "const ", "let ", "var ", "function ",
+    "class ", "async ", "await ",
+  ];
+
+  const skipList = lang === "python" ? PYTHON_SKIP : JS_SKIP;
+  if (skipList.some((s) => trimmed.startsWith(s))) return code;
+
+  // Skip if the line is indented (inside a block — wrapping would be a syntax error)
+  if (lastLine !== lastLine.trimStart()) return code;
+
+  // Skip single-character lines and empty assignments
+  if (trimmed.length < 2) return code;
+
+  // Wrap bare expression with the appropriate print call
+  if (lang === "python") {
+    lines[lastIdx] = `print(${trimmed})`;
+  } else {
+    lines[lastIdx] = `console.log(${trimmed});`;
+  }
+
+  return lines.join("\n");
+}
+
 export async function runCode(
   language: string,
   code: string,
   timeoutSeconds: number = DEFAULT_SANDBOX_TIMEOUT_S
 ): Promise<SandboxResult> {
+  const processedCode = ensureOutput(language, code);
   if (isSandboxAvailable()) {
-    const result = await executeCodeInSandbox(language, code, timeoutSeconds);
+    const result = await executeCodeInSandbox(language, processedCode, timeoutSeconds);
     if (!result.infraError) return result;
   }
-  return executeCodeLocally(language, code, timeoutSeconds);
+  return executeCodeLocally(language, processedCode, timeoutSeconds);
 }

@@ -3,13 +3,17 @@ import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
+import { RedisStore } from "connect-redis";
 import rateLimit from "express-rate-limit";
+import { getRedisClient, makeNodeRedisCompat, RedisRateLimitStore } from "./lib/redis";
 import { storage } from "./storage";
 import { startQueueWorker } from "./engine/queue";
 import { taskLogEmitter } from "./engine/emitter";
 import { PROVIDER_MODELS, runAgent } from "./providers";
 import { insertWorkspaceSchema, insertOrchestratorSchema, insertAgentSchema, insertChannelSchema, insertTaskSchema } from "@shared/schema";
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createMcpServer } from "./mcp/server";
 import { encrypt, decrypt } from "./lib/encryption";
 import { validateCredentials, executeCloudTool, retrieveRAGFlowContext } from "./cloud/executor";
 import { getToolsForProvider, detectProviderFromToolName, CODE_INTERPRETER_TOOL, SPAWN_AGENT_TOOL } from "./cloud/tools";
@@ -69,30 +73,11 @@ async function generateChatTitle(firstMessage: string): Promise<string> {
 }
 
 // ── Rate limiters ─────────────────────────────────────────────────────────────
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Too many login attempts. Please try again in 15 minutes." },
-});
-
-const webhookLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 60,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Webhook rate limit exceeded. Maximum 60 requests per minute." },
-});
-
-const apiLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 300,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Too many requests. Please slow down." },
-  skip: (req) => req.path.startsWith("/api/tasks/") && req.path.endsWith("/stream"),
-});
+// Rate limiters are created lazily inside registerRoutes() once the Redis
+// client is available.  The variables below are initialised there.
+let loginLimiter:   ReturnType<typeof rateLimit>;
+let webhookLimiter: ReturnType<typeof rateLimit>;
+let apiLimiter:     ReturnType<typeof rateLimit>;
 
 type WorkspaceAgentMeta = {
   id: string;
@@ -302,6 +287,44 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   startQueueWorker();
 
+  // Trust reverse-proxy headers (X-Forwarded-For, X-Forwarded-Proto).
+  // Must be set before rate limiters so X-Forwarded-For is used as the client IP.
+  app.set("trust proxy", 1);
+
+  // ── Redis client (optional — graceful no-op when REDIS_URL is not set) ────
+  const redisClient = getRedisClient();
+  const makeStore = (windowMs: number, prefix: string) =>
+    redisClient ? new RedisRateLimitStore(redisClient, windowMs, prefix) : undefined;
+
+  // ── Rate limiters — Redis store preferred, in-memory fallback ─────────────
+  loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: makeStore(15 * 60 * 1000, "rl:login:"),
+    message: { error: "Too many login attempts. Please try again in 15 minutes." },
+  });
+
+  webhookLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: makeStore(60 * 1000, "rl:webhook:"),
+    message: { error: "Webhook rate limit exceeded. Maximum 60 requests per minute." },
+  });
+
+  apiLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 300,
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: makeStore(60 * 1000, "rl:api:"),
+    message: { error: "Too many requests. Please slow down." },
+    skip: (req) => req.path.startsWith("/api/tasks/") && req.path.endsWith("/stream"),
+  });
+
   // ── Inference proxy ────────────────────────────────────────────────────────
   // Mounted BEFORE the global API rate-limiter so it only counts against its
   // own budget.  Access is gated by short-lived task tokens, not sessions —
@@ -310,12 +333,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.use(apiLimiter);
 
-  // Trust reverse-proxy headers (X-Forwarded-For, X-Forwarded-Proto).
-  // Needed for accurate rate-limiting and for secure cookies to work
-  // correctly when behind nginx / traefik / AWS ALB.
-  app.set("trust proxy", 1);
+  // ── Session store — Redis preferred, PostgreSQL fallback ─────────────────
+  const sessionStore = redisClient
+    ? new RedisStore({ client: makeNodeRedisCompat(redisClient) as any, prefix: "sess:", ttl: 7 * 24 * 60 * 60 })
+    : new (connectPgSimple(session))({
+        pool,
+        tableName: "user_sessions",
+        pruneSessionInterval: 60 * 60, // prune expired sessions hourly
+      });
 
-  const PgSession = connectPgSimple(session);
+  if (redisClient) {
+    console.log("[session] Using Redis store");
+  } else {
+    console.log("[session] Using PostgreSQL store (set REDIS_URL to enable Redis)");
+  }
+
   app.use(session({
     // loadSecret checks SESSION_SECRET_FILE first (Docker secrets mount),
     // then falls back to SESSION_SECRET env var.
@@ -332,14 +364,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       secure: process.env.COOKIE_SECURE === "true",
       maxAge: 7 * 24 * 60 * 60 * 1000,
     },
-    // Reuse the application's pg.Pool so the session store shares the same
-    // connection pool as Drizzle.  This avoids a second DATABASE_URL read and
-    // keeps the connection count low.
-    store: new PgSession({
-      pool,
-      tableName: "user_sessions",
-      pruneSessionInterval: 60 * 60, // prune expired sessions hourly
-    }),
+    store: sessionStore,
   }));
 
   // ── CSRF protection ───────────────────────────────────────────────────────
@@ -1212,6 +1237,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/workspaces/:id/stats", requireAuth, async (req, res) => {
     const stats = await storage.getWorkspaceStats(req.params.id as string);
     res.json(stats);
+  });
+
+  app.get("/api/workspaces/:id/activity", requireAuth, async (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit as string) || 25, 50);
+    const items = await storage.getWorkspaceActivity(req.params.id as string, limit);
+    res.json(items);
   });
 
   app.get("/api/workspaces/:id/conversations", requireAuth, async (req, res) => {
@@ -2228,6 +2259,83 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
     }
   })();
+
+  // ── MCP API Keys ─────────────────────────────────────────────────────────────
+  app.get("/api/workspaces/:id/mcp-keys", requireWorkspaceAdmin, async (req, res) => {
+    const keys = await storage.listMcpApiKeys(req.params.id as string);
+    res.json(keys.map(k => ({ id: k.id, name: k.name, createdAt: k.createdAt, lastUsedAt: k.lastUsedAt })));
+  });
+
+  app.post("/api/workspaces/:id/mcp-keys", requireWorkspaceAdmin, async (req, res) => {
+    const { name } = req.body;
+    if (!name?.trim()) return res.status(400).json({ error: "Name is required" });
+    const raw = `nano_mcp_${randomUUID().replace(/-/g, "")}`;
+    const keyHash = createHash("sha256").update(raw).digest("hex");
+    const key = await storage.createMcpApiKey({
+      workspaceId: req.params.id as string,
+      name: name.trim(),
+      keyHash,
+      createdBy: (req as any).user?.id,
+    });
+    res.status(201).json({ id: key.id, name: key.name, createdAt: key.createdAt, key: raw });
+  });
+
+  app.delete("/api/mcp-keys/:id", requireAuth, async (req, res) => {
+    await storage.deleteMcpApiKey(req.params.id as string);
+    res.json({ success: true });
+  });
+
+  // ── MCP HTTP/SSE Endpoint ─────────────────────────────────────────────────────
+  const mcpSessions = new Map<string, StreamableHTTPServerTransport>();
+
+  async function mcpAuthMiddleware(req: Request, res: Response, next: () => void) {
+    const auth = req.headers.authorization;
+    if (!auth?.startsWith("Bearer ")) {
+      res.status(401).json({ error: "Missing Bearer token" });
+      return;
+    }
+    const raw = auth.slice(7);
+    const keyHash = createHash("sha256").update(raw).digest("hex");
+    const apiKey = await storage.getMcpApiKeyByHash(keyHash);
+    if (!apiKey) {
+      res.status(401).json({ error: "Invalid API key" });
+      return;
+    }
+    storage.updateMcpApiKeyLastUsed(apiKey.id).catch(() => {});
+    (req as any).mcpWorkspaceId = apiKey.workspaceId;
+    next();
+  }
+
+  app.all("/mcp", mcpAuthMiddleware as any, async (req, res) => {
+    try {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+      if (sessionId && mcpSessions.has(sessionId)) {
+        const transport = mcpSessions.get(sessionId)!;
+        await transport.handleRequest(req as any, res as any, req.body);
+        return;
+      }
+
+      if (sessionId && !mcpSessions.has(sessionId)) {
+        res.status(404).json({ error: "Session not found" });
+        return;
+      }
+
+      const workspaceId = (req as any).mcpWorkspaceId as string;
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (id) => { mcpSessions.set(id, transport); },
+        onsessionclosed: (id) => { mcpSessions.delete(id); },
+      });
+
+      const mcpServer = createMcpServer(workspaceId);
+      await mcpServer.connect(transport);
+      await transport.handleRequest(req as any, res as any, req.body);
+    } catch (err: any) {
+      console.error("[mcp] Error handling request:", err);
+      if (!res.headersSent) res.status(500).json({ error: "MCP error" });
+    }
+  });
 
   return httpServer;
 }

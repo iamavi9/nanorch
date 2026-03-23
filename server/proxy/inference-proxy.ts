@@ -83,8 +83,20 @@ interface ProviderConfig {
 
 const PROVIDERS: Record<string, ProviderConfig> = {
   openai: {
-    realBaseUrl: () =>
-      process.env.AI_INTEGRATIONS_OPENAI_BASE_URL ?? "https://api.openai.com",
+    realBaseUrl: () => {
+      const raw = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL ?? "https://api.openai.com";
+      // The docker-executor encodes /v1 in the proxy URL it passes to agent containers
+      // (e.g. OPENAI_BASE_URL=${proxyBase}/openai/v1), so pathSuffix already starts with
+      // "v1/chat/completions".  If the configured base URL also contains a trailing /v1
+      // (the docker-compose.yml default is https://api.openai.com/v1), the proxy would
+      // build "/v1" + "/v1/chat/completions" = "/v1/v1/chat/completions" → 404.
+      // Strip any trailing version segment to prevent that duplication.
+      // Examples:
+      //   https://api.openai.com/v1   → https://api.openai.com
+      //   https://api.openai.com      → https://api.openai.com  (no-op)
+      //   https://my.server.com/api/v1 → https://my.server.com/api
+      return raw.replace(/\/v\d+(\.\d+)?\/?$/, "").replace(/\/$/, "");
+    },
     authScheme: "bearer",
     secretName: "AI_INTEGRATIONS_OPENAI_API_KEY",
   },
@@ -109,9 +121,9 @@ export function createInferenceProxyRouter(): Router {
   const router = Router();
 
   // Match  /internal/proxy/:provider/<anything>
-  // Named wildcard required by path-to-regexp v8+.
-  router.all("/:provider/*path", (req: Request, res: Response) => {
-    // Explicitly cast: Express wildcard routes can widen param types in TS
+  // Use router.use so req.path contains the remainder after /:provider —
+  // this is the most reliable cross-Express-version catch-all pattern.
+  router.use("/:provider", (req: Request, res: Response) => {
     const provider = req.params["provider"] as string;
     const cfg = PROVIDERS[provider];
     if (!cfg) {
@@ -143,8 +155,9 @@ export function createInferenceProxyRouter(): Router {
     }
 
     // ── 3. Build target URL ──────────────────────────────────────────────────
-    // req.params.path is the named wildcard catch-all after /:provider/
-    const pathSuffix = (req.params as Record<string, string>)["path"] ?? "";
+    // req.path is the remainder after /:provider (e.g. /v1/chat/completions).
+    // Strip the leading slash so pathSuffix = "v1/chat/completions".
+    const pathSuffix = req.path.replace(/^\//, "");
     const baseUrl    = cfg.realBaseUrl().replace(/\/$/, "");
     let   targetPath = `/${pathSuffix}`;
 

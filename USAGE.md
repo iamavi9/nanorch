@@ -1,6 +1,6 @@
 # NanoOrch — Usage Guide
 
-A step-by-step walkthrough for setting up workspaces, agents, integrations, approval gates, pipelines, observability, scheduled jobs, notification channels, workspace limits, and chatting with your agents.
+A step-by-step walkthrough for setting up workspaces, agents, integrations, approval gates, pipelines, observability, scheduled jobs, notification channels, workspace limits, chatting with your agents, and connecting AI clients via the MCP server.
 
 ---
 
@@ -25,6 +25,7 @@ A step-by-step walkthrough for setting up workspaces, agents, integrations, appr
 17. [Secure deployment — Docker secrets](#17-secure-deployment--docker-secrets)
 18. [SSO — OIDC and SAML 2.0](#18-sso--oidc-and-saml-20)
 19. [Event-driven triggers](#19-event-driven-triggers)
+20. [MCP Server — remote AI client access](#20-mcp-server--remote-ai-client-access)
 
 ---
 
@@ -911,6 +912,76 @@ The **Event History** tab on the Triggers page shows every webhook call for all 
 
 ---
 
+## 20. MCP Server — remote AI client access
+
+The **MCP** page (workspace sidebar) lets you connect Claude Desktop or any Model Context Protocol-compatible AI client directly to a NanoOrch workspace. Once connected, the AI client can run tasks, check approvals, trigger pipelines, and fire scheduled jobs — without using the web UI.
+
+### What the MCP server exposes
+
+| Tool | What the AI client can do |
+|------|--------------------------|
+| `list_orchestrators` | See all orchestrators in the workspace with status and model info |
+| `list_agents` | See all agents, their provider and model, and which orchestrator they belong to |
+| `run_task` | Submit a task to a specific agent and wait for the output |
+| `get_task_status` | Check the status, output, and recent logs of any task by ID |
+| `list_pending_approvals` | See all approvals currently waiting for a human decision |
+| `approve_request` | Approve or reject a pending approval with an optional note |
+| `trigger_pipeline` | Manually run a pipeline immediately |
+| `fire_scheduled_job` | Execute a scheduled job right now, bypassing its cron schedule |
+
+### Step 1 — Create an MCP API key
+
+1. Open a workspace → **MCP** in the sidebar
+2. Click **New Key**
+3. Enter a name (e.g. `claude-desktop` or `my-agent-script`)
+4. Click **Create Key**
+5. **Copy the revealed key immediately** — it starts with `nano_mcp_` and is shown only once. It is stored as a SHA-256 hash and cannot be recovered.
+
+> Keys are workspace-scoped. Anyone with the key can call all 8 MCP tools against that workspace. Treat it like a password.
+
+### Step 2 — Connect Claude Desktop
+
+The MCP page displays a ready-to-paste config snippet. Copy it and open:
+
+- **macOS/Linux:** `~/.config/claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+Paste the snippet into the `mcpServers` object (or create the file if it doesn't exist). Replace the `YOUR_API_KEY` placeholder with the key you copied in Step 1.
+
+```json
+{
+  "mcpServers": {
+    "nanoorch": {
+      "url": "https://your-host:3000/mcp",
+      "transport": "http",
+      "headers": {
+        "Authorization": "Bearer nano_mcp_<your-key>"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop. NanoOrch tools will appear in the tool panel.
+
+### Step 3 — Use the tools from Claude
+
+Once connected, you can give Claude natural-language instructions and it will invoke the right tool:
+
+| What you say to Claude | What happens in NanoOrch |
+|------------------------|--------------------------|
+| "List all orchestrators in my workspace" | `list_orchestrators` runs |
+| "Run the infra-bot agent with prompt: list all EC2 instances" | `run_task` creates and executes the task |
+| "Are there any pending approvals?" | `list_pending_approvals` returns the queue |
+| "Approve the request to create a Jira ticket" | `approve_request` resolves the gate |
+| "Fire the weekly report pipeline" | `trigger_pipeline` starts the run |
+
+### Managing keys
+
+The MCP page shows all active keys with their name and last-used timestamp (the raw key is never shown again after creation). To revoke a key, click **Revoke** on its row — it becomes immediately invalid.
+
+---
+
 ## Quick-start checklist
 
 - [ ] Log in as global admin
@@ -932,5 +1003,6 @@ The **Event History** tab on the Triggers page shows every webhook call for all 
 - [ ] (Optional) Create member and workspace admin accounts and share the chat link
 - [ ] (Optional) Configure SSO — set `APP_URL`, add an OIDC or SAML provider at **SSO Settings**
 - [ ] (Optional) Set up Event Triggers — wire GitHub/GitLab/Jira webhooks to fire agent tasks
+- [ ] (Optional) Set up MCP Server — open **MCP** in the sidebar, create an API key, paste the config into Claude Desktop
 - [ ] **Production:** Switch to Docker secrets — run `./secrets/create-secrets.sh` and use `docker-compose.secrets.yml`
 - [ ] **Production:** Enable `SANDBOX_RUNTIME=runsc`, `AGENT_RUNTIME=runsc`, and `SECCOMP_PROFILE` for full container hardening

@@ -12,14 +12,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Plus, Trash2, CheckCircle2, XCircle, Loader2, RefreshCw, Plug,
-  ShieldCheck, CloudCog, Database, Wrench, BookOpen, Pencil, MessageSquare,
+  ShieldCheck, CloudCog, Database, Wrench, BookOpen, Pencil, MessageSquare, LifeBuoy,
 } from "lucide-react";
 import { SiAmazon, SiGooglecloud, SiJira, SiGithub, SiGitlab, SiSlack, SiGooglechat } from "react-icons/si";
 import type { CloudIntegration } from "@shared/schema";
 
 interface Props { workspaceId: string; }
 
-type Provider = "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "slack" | "google_chat";
+type Provider = "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "slack" | "google_chat" | "servicenow";
 
 const PROVIDER_META: Record<Provider, { label: string; icon: React.ElementType; color: string; bg: string; category: string }> = {
   aws:         { label: "AWS",          icon: SiAmazon,          color: "text-orange-500",  bg: "bg-orange-500/10",   category: "Cloud" },
@@ -32,6 +32,7 @@ const PROVIDER_META: Record<Provider, { label: string; icon: React.ElementType; 
   teams:       { label: "MS Teams",     icon: MessageSquare,     color: "text-indigo-500",  bg: "bg-indigo-500/10",   category: "Messaging" },
   slack:       { label: "Slack",        icon: SiSlack,           color: "text-green-500",   bg: "bg-green-500/10",    category: "Messaging" },
   google_chat: { label: "Google Chat",  icon: SiGooglechat,      color: "text-blue-400",    bg: "bg-blue-400/10",     category: "Messaging" },
+  servicenow:  { label: "ServiceNow",   icon: LifeBuoy,          color: "text-emerald-500", bg: "bg-emerald-500/10",  category: "ITSM" },
 };
 
 type SafeIntegration = Omit<CloudIntegration, "credentialsEncrypted"> & { credentialsMeta?: Record<string, string> };
@@ -67,6 +68,7 @@ const EMPTY_CREDS: Record<Provider, Record<string, string>> = {
   teams:       { webhookUrl: "" },
   slack:       { botToken: "", defaultChannel: "" },
   google_chat: { webhookUrl: "" },
+  servicenow:  { instanceUrl: "", username: "", password: "" },
 };
 
 const REQUIRED_FIELDS: Record<Provider, string[]> = {
@@ -80,6 +82,7 @@ const REQUIRED_FIELDS: Record<Provider, string[]> = {
   teams:       ["webhookUrl"],
   slack:       ["botToken"],
   google_chat: ["webhookUrl"],
+  servicenow:  ["instanceUrl", "username", "password"],
 };
 
 const FIELD_LABELS: Record<string, string> = {
@@ -91,6 +94,7 @@ const FIELD_LABELS: Record<string, string> = {
   token: "Token",
   botToken: "Bot Token", defaultChannel: "Default Channel",
   webhookUrl: "Webhook URL",
+  instanceUrl: "Instance URL", username: "Username", password: "Password",
 };
 
 function validateRequiredCreds(provider: Provider, creds: Record<string, string>): string | null {
@@ -231,6 +235,26 @@ function CredentialFields({ provider, creds, onChange }: {
           In Google Chat, open a Space → Apps &amp; Integrations → Webhooks → Add Webhook. Copy the URL and paste it here.
         </p>
       </div>
+    </div>
+  );
+
+  if (provider === "servicenow") return (
+    <div className="space-y-3">
+      <div className="space-y-1.5"><Label>Instance URL</Label>
+        <Input placeholder="https://your-instance.service-now.com" value={creds.instanceUrl} onChange={(e) => set("instanceUrl", e.target.value)} data-testid="input-servicenow-url" />
+        <p className="text-xs text-muted-foreground">Your ServiceNow instance URL — e.g. https://acmecorp.service-now.com</p>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5"><Label>Username</Label>
+          <Input placeholder="automation.user" value={creds.username} onChange={(e) => set("username", e.target.value)} data-testid="input-servicenow-username" />
+        </div>
+        <div className="space-y-1.5"><Label>Password</Label>
+          <Input type="password" placeholder="••••••••" value={creds.password} onChange={(e) => set("password", e.target.value)} data-testid="input-servicenow-password" />
+        </div>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Create a dedicated integration user in ServiceNow with the <strong>itil</strong> role for incident/RITM/change access and <strong>catalog</strong> role for Service Catalog ordering.
+      </p>
     </div>
   );
 
@@ -411,6 +435,7 @@ export default function IntegrationsPage({ workspaceId }: Props) {
     DevTools: integrations.filter((i) => ["jira", "github", "gitlab"].includes(i.provider)),
     Knowledge: integrations.filter((i) => i.provider === "ragflow"),
     Messaging: integrations.filter((i) => ["teams", "slack", "google_chat"].includes(i.provider)),
+    ITSM: integrations.filter((i) => ["servicenow"].includes(i.provider)),
   };
 
   return (
@@ -444,6 +469,7 @@ export default function IntegrationsPage({ workspaceId }: Props) {
                     <SelectItem value="teams">MS Teams</SelectItem>
                     <SelectItem value="slack">Slack</SelectItem>
                     <SelectItem value="google_chat">Google Chat</SelectItem>
+                    <SelectItem value="servicenow">ServiceNow</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -513,7 +539,7 @@ export default function IntegrationsPage({ workspaceId }: Props) {
         </Card>
       ) : (
         <div className="space-y-8">
-          {(["Cloud", "DevTools", "Knowledge", "Messaging"] as const).map((cat) => {
+          {(["Cloud", "DevTools", "Knowledge", "Messaging", "ITSM"] as const).map((cat) => {
             const items = grouped[cat];
             if (items.length === 0) return null;
             return (

@@ -302,6 +302,22 @@ const INCREMENTAL_MIGRATIONS: Array<{ name: string; sql: string }> = [
     sql: `ALTER TABLE "workspace_config" ADD COLUMN IF NOT EXISTS "utilization_alert_threshold_tokens" integer;
           ALTER TABLE "workspace_config" ADD COLUMN IF NOT EXISTS "utilization_alert_channel_id" varchar`,
   },
+  {
+    name: "add_cloud_provider_servicenow",
+    sql: `ALTER TYPE "cloud_provider" ADD VALUE IF NOT EXISTS 'servicenow'`,
+  },
+  {
+    name: "create_mcp_api_keys",
+    sql: `CREATE TABLE IF NOT EXISTS "mcp_api_keys" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "workspace_id" varchar NOT NULL REFERENCES "workspaces"("id") ON DELETE CASCADE,
+      "name" text NOT NULL,
+      "key_hash" text NOT NULL,
+      "created_by" varchar REFERENCES "users"("id") ON DELETE SET NULL,
+      "last_used_at" timestamp,
+      "created_at" timestamp DEFAULT now()
+    )`,
+  },
 ];
 
 const IDEMPOTENT_ERROR_CODES = new Set([

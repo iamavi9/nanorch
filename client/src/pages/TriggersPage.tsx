@@ -12,7 +12,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Pencil, Trash2, Webhook, Copy, ChevronDown, ChevronUp, CheckCircle2, XCircle, Clock } from "lucide-react";
+import { Plus, Pencil, Trash2, Webhook, Copy, Check, ChevronDown, ChevronUp, CheckCircle2, XCircle, Clock } from "lucide-react";
 import type { EventTrigger, TriggerEvent, Orchestrator, Agent } from "@shared/schema";
 import PaginationControls from "@/components/PaginationControls";
 
@@ -69,6 +69,7 @@ export default function TriggersPage({ workspaceId }: { workspaceId: string }) {
   const [form, setForm] = useState<TriggerFormState>(BLANK);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [eventsPage, setEventsPage] = useState(1);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   useEffect(() => { setEventsPage(1); }, [expandedId]);
 
@@ -166,9 +167,23 @@ export default function TriggersPage({ workspaceId }: { workspaceId: string }) {
     return `${base}/api/webhooks/${t.source}/${t.id}`;
   };
 
-  const copyWebhook = (t: EventTrigger) => {
-    navigator.clipboard.writeText(webhookUrl(t));
+  const copyWebhook = async (t: EventTrigger) => {
+    const url = webhookUrl(t);
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      const el = document.createElement("textarea");
+      el.value = url;
+      el.style.position = "fixed";
+      el.style.opacity = "0";
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+    }
+    setCopiedId(t.id);
     toast({ title: "Webhook URL copied" });
+    setTimeout(() => setCopiedId(null), 2000);
   };
 
   return (
@@ -222,8 +237,12 @@ export default function TriggersPage({ workspaceId }: { workspaceId: string }) {
                       <CardDescription className="text-xs font-mono truncate max-w-lg">{webhookUrl(t)}</CardDescription>
                     </div>
                     <div className="flex gap-1 shrink-0">
-                      <Button variant="ghost" size="icon" title="Copy webhook URL" onClick={() => copyWebhook(t)}>
-                        <Copy className="h-4 w-4" />
+                      <Button variant="ghost" size="icon" title="Copy webhook URL"
+                        data-testid={`button-copy-webhook-${t.id}`}
+                        onClick={() => copyWebhook(t)}>
+                        {copiedId === t.id
+                          ? <Check className="h-4 w-4 text-green-500" />
+                          : <Copy className="h-4 w-4" />}
                       </Button>
                       <Button variant="ghost" size="icon" data-testid={`button-edit-trigger-${t.id}`} onClick={() => openEdit(t)}>
                         <Pencil className="h-4 w-4" />

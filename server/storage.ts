@@ -4,7 +4,7 @@ import {
   users, workspaces, workspaceMembers, orchestrators, agents, channels, channelDeliveries, tasks, taskLogs, agentMemory, cloudIntegrations,
   chatConversations, chatMessages, scheduledJobs,
   approvalRequests, pipelines, pipelineSteps, pipelineRuns, pipelineStepRuns, tokenUsage,
-  workspaceConfig, commsThreads, ssoProviders, eventTriggers, triggerEvents,
+  workspaceConfig, commsThreads, ssoProviders, eventTriggers, triggerEvents, mcpApiKeys,
   type User, type InsertUser,
   type Workspace, type InsertWorkspace,
   type Orchestrator, type InsertOrchestrator,
@@ -29,6 +29,7 @@ import {
   type SsoProvider, type InsertSsoProvider,
   type EventTrigger, type InsertEventTrigger,
   type TriggerEvent,
+  type McpApiKey,
 } from "@shared/schema";
 
 export type WorkspaceMemberWithUser = {
@@ -127,6 +128,7 @@ export interface IStorage {
   updateChatMessage(id: string, data: Partial<ChatMessage>): Promise<ChatMessage>;
   listAgentsForWorkspace(workspaceId: string): Promise<(Agent & { orchestratorName: string; provider: string; model: string; baseUrl: string | null })[]>;
   getWorkspaceStats(workspaceId: string): Promise<{ orchestrators: number; agents: number; completedTasks: number; failedTasks: number; runningTasks: number; pendingTasks: number }>;
+  getWorkspaceActivity(workspaceId: string, limit?: number): Promise<Array<{ id: string; type: string; status: string; title: string; subtitle: string; at: Date }>>;
 
   listScheduledJobs(workspaceId: string): Promise<ScheduledJob[]>;
   listAllActiveScheduledJobs(): Promise<ScheduledJob[]>;
@@ -208,6 +210,12 @@ export interface IStorage {
   countTriggerEvents(triggerId: string): Promise<number>;
 
   listChannelsForWorkspace(workspaceId: string): Promise<Channel[]>;
+
+  createMcpApiKey(data: { workspaceId: string; name: string; keyHash: string; createdBy?: string }): Promise<McpApiKey>;
+  listMcpApiKeys(workspaceId: string): Promise<McpApiKey[]>;
+  getMcpApiKeyByHash(keyHash: string): Promise<McpApiKey | undefined>;
+  updateMcpApiKeyLastUsed(id: string): Promise<void>;
+  deleteMcpApiKey(id: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -706,6 +714,61 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
+  async getWorkspaceActivity(workspaceId: string, limit = 25) {
+    const orchRows = await db.select({ id: orchestrators.id }).from(orchestrators).where(eq(orchestrators.workspaceId, workspaceId));
+    const orchIds = orchRows.map(r => r.id);
+
+    const pipelineRows = orchIds.length > 0
+      ? await db.select({ id: pipelines.id, name: pipelines.name }).from(pipelines).where(inArray(pipelines.orchestratorId, orchIds))
+      : [];
+    const pipelineMap: Record<string, string> = Object.fromEntries(pipelineRows.map(p => [p.id, p.name]));
+    const pipelineIds = pipelineRows.map(p => p.id);
+
+    type Item = { id: string; type: string; status: string; title: string; subtitle: string; at: Date };
+    const items: Item[] = [];
+
+    if (orchIds.length > 0) {
+      const recentTasks = await db
+        .select({ id: tasks.id, status: tasks.status, input: tasks.input, orchestratorId: tasks.orchestratorId, agentName: agents.name, createdAt: tasks.createdAt })
+        .from(tasks)
+        .leftJoin(agents, eq(tasks.agentId, agents.id))
+        .where(inArray(tasks.orchestratorId, orchIds))
+        .orderBy(desc(tasks.createdAt))
+        .limit(15);
+      for (const t of recentTasks) {
+        items.push({ id: `task-${t.id}`, type: "task", status: t.status ?? "pending",
+          title: t.agentName ? `${t.agentName}` : "Task", subtitle: (t.input ?? "").slice(0, 100), at: t.createdAt ?? new Date() });
+      }
+    }
+
+    if (pipelineIds.length > 0) {
+      const recentRuns = await db
+        .select({ id: pipelineRuns.id, pipelineId: pipelineRuns.pipelineId, status: pipelineRuns.status, triggeredBy: pipelineRuns.triggeredBy, createdAt: pipelineRuns.createdAt })
+        .from(pipelineRuns)
+        .where(inArray(pipelineRuns.pipelineId, pipelineIds))
+        .orderBy(desc(pipelineRuns.createdAt))
+        .limit(10);
+      for (const r of recentRuns) {
+        items.push({ id: `pipeline-${r.id}`, type: "pipeline_run", status: r.status,
+          title: `Pipeline: ${pipelineMap[r.pipelineId] ?? "Unknown"}`, subtitle: `Triggered by ${r.triggeredBy ?? "manual"}`, at: r.createdAt ?? new Date() });
+      }
+    }
+
+    const recentApprovals = await db
+      .select({ id: approvalRequests.id, status: approvalRequests.status, agentName: approvalRequests.agentName, message: approvalRequests.message, createdAt: approvalRequests.createdAt })
+      .from(approvalRequests)
+      .where(eq(approvalRequests.workspaceId, workspaceId))
+      .orderBy(desc(approvalRequests.createdAt))
+      .limit(10);
+    for (const a of recentApprovals) {
+      items.push({ id: `approval-${a.id}`, type: "approval", status: a.status,
+        title: a.agentName ? `${a.agentName} requested approval` : "Approval requested", subtitle: (a.message ?? "").slice(0, 100), at: a.createdAt ?? new Date() });
+    }
+
+    items.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+    return items.slice(0, limit);
+  }
+
   async listScheduledJobs(workspaceId: string) {
     return db.select().from(scheduledJobs).where(eq(scheduledJobs.workspaceId, workspaceId)).orderBy(desc(scheduledJobs.createdAt));
   }
@@ -1105,6 +1168,33 @@ export class DatabaseStorage implements IStorage {
       .innerJoin(orchestrators, eq(channels.orchestratorId, orchestrators.id))
       .where(eq(orchestrators.workspaceId, workspaceId));
     return rows.map((r) => r.channel);
+  }
+
+  async createMcpApiKey(data: { workspaceId: string; name: string; keyHash: string; createdBy?: string }): Promise<McpApiKey> {
+    const [key] = await db.insert(mcpApiKeys).values({
+      workspaceId: data.workspaceId,
+      name: data.name,
+      keyHash: data.keyHash,
+      createdBy: data.createdBy ?? null,
+    }).returning();
+    return key;
+  }
+
+  async listMcpApiKeys(workspaceId: string): Promise<McpApiKey[]> {
+    return db.select().from(mcpApiKeys).where(eq(mcpApiKeys.workspaceId, workspaceId)).orderBy(desc(mcpApiKeys.createdAt));
+  }
+
+  async getMcpApiKeyByHash(keyHash: string): Promise<McpApiKey | undefined> {
+    const [key] = await db.select().from(mcpApiKeys).where(eq(mcpApiKeys.keyHash, keyHash));
+    return key;
+  }
+
+  async updateMcpApiKeyLastUsed(id: string): Promise<void> {
+    await db.update(mcpApiKeys).set({ lastUsedAt: new Date() }).where(eq(mcpApiKeys.id, id));
+  }
+
+  async deleteMcpApiKey(id: string): Promise<void> {
+    await db.delete(mcpApiKeys).where(eq(mcpApiKeys.id, id));
   }
 }
 

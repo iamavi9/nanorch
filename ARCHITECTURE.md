@@ -38,6 +38,7 @@
 29. [Environment Variables Reference](#29-environment-variables-reference)
 30. [REST API Surface](#30-rest-api-surface)
 31. [Key Data Flows](#31-key-data-flows)
+32. [MCP Server](#32-mcp-server)
 
 ---
 
@@ -62,6 +63,7 @@ NanoOrch is a **self-hosted, multi-tenant AI agent orchestrator**. It lets teams
 | Triggers | GitHub, GitLab, and Jira webhook event handlers |
 | Observability | Token usage, cost estimation, per-agent breakdown |
 | Security | gVisor isolation, seccomp profiles, AES-256-GCM credential encryption, inference proxy, Docker secrets |
+| MCP Server | HTTP/SSE Model Context Protocol server — 8 tools, workspace-scoped API keys, remote AI client access |
 
 ---
 
@@ -213,6 +215,7 @@ nanoorch/
 │           ├── TriggersPage.tsx
 │           ├── MemberHomePage.tsx
 │           ├── MemberChatPage.tsx
+│           ├── McpPage.tsx
 │           └── not-found.tsx
 │
 ├── migrations/                    # Drizzle-generated initial SQL files
@@ -256,6 +259,9 @@ nanoorch/
 │   │   ├── tools.ts               # Tool definitions per provider (AWS, GCP, Azure, ...)
 │   │   └── executor.ts            # Tool execution router
 │   │
+│   ├── mcp/
+│   │   └── server.ts              # MCP server factory — 8 workspace-scoped tools (StreamableHTTPServerTransport)
+│   │
 │   ├── comms/                     # Two-way messaging adapters
 │   │   ├── slack-handler.ts       # Slack Events API handler
 │   │   ├── teams-handler.ts       # Microsoft Teams Bot Framework handler
@@ -298,7 +304,7 @@ nanoorch/
 
 ### Table Inventory
 
-NanoOrch has **26 tables** across three creation mechanisms:
+NanoOrch has **27 tables** across three creation mechanisms:
 
 **Mechanism A — Drizzle SQL migration files** (`migrations/0000_initial.sql` through `0004_workspace_config.sql`):
 
@@ -347,6 +353,7 @@ NanoOrch has **26 tables** across three creation mechanisms:
 | `create_sso_providers` | SSO provider configuration (OIDC/SAML) |
 | `create_event_triggers` | Webhook event trigger definitions |
 | `create_trigger_events` | Webhook delivery history per trigger |
+| `create_mcp_api_keys` | Workspace-scoped API keys for MCP remote access |
 
 **Mechanism C — Internal tracking table (not in Drizzle schema):**
 
@@ -764,7 +771,7 @@ Server issues task token (32 random hex bytes, 15-minute TTL)
 Container receives task_token as OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY
     │
     ▼
-Container directs AI calls to http://host.docker.internal:5000/internal/proxy/<provider>/*
+Container directs AI calls to DOCKER_PROXY_URL (default: http://host.docker.internal:<PORT>/internal/proxy) /<provider>/*
     │
     ▼
 Proxy verifies token (in-memory Map, no DB round-trip)
@@ -1512,6 +1519,7 @@ Stage 2: node:20-alpine (runtime)
 | `AGENT_RUNTIME` | No | `""` | Container runtime for agent tasks (`runsc` for gVisor) |
 | `SANDBOX_RUNTIME` | No | `""` | Container runtime for code sandbox (`runsc` for gVisor) |
 | `SECCOMP_PROFILE` | No | — | Path to custom seccomp profile JSON |
+| `DOCKER_PROXY_URL` | No | `http://host.docker.internal:<PORT>/internal/proxy` | Inference proxy base URL passed to agent containers. Override on Docker Engine < 20.10 with `http://172.17.0.1:<PORT>/internal/proxy` |
 | `AI_INTEGRATIONS_OPENAI_API_KEY` | No | — | OpenAI API key |
 | `AI_INTEGRATIONS_ANTHROPIC_API_KEY` | No | — | Anthropic API key |
 | `AI_INTEGRATIONS_GEMINI_API_KEY` | No | — | Gemini API key |
@@ -1690,6 +1698,22 @@ All endpoints are prefixed `/api`. Protected endpoints require an authenticated 
 | `POST` | `/api/comms/teams/:channelId` | Bot Framework JWT | Teams Bot Framework activities |
 | `POST` | `/api/comms/teams/:channelId/actions` | Bot Framework JWT | Teams Adaptive Card submit actions |
 
+### MCP API Keys
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/workspaces/:id/mcp-keys` | WS admin | List workspace MCP API keys |
+| `POST` | `/api/workspaces/:id/mcp-keys` | WS admin | Create MCP API key (returns raw key once) |
+| `DELETE` | `/api/mcp-keys/:id` | WS admin | Revoke MCP API key |
+
+### MCP Server Endpoint
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/mcp` | Bearer MCP key | Initiate MCP session (HTTP transport) |
+| `GET` | `/mcp` | Bearer MCP key | Open SSE stream for MCP session |
+| `DELETE` | `/mcp` | Bearer MCP key | Terminate MCP session |
+
 ### Inference Proxy (internal)
 
 | Method | Path | Auth | Description |
@@ -1832,6 +1856,73 @@ session.userRole = user.role
     │
 302 Redirect → /workspaces
 ```
+
+---
+
+## 32. MCP Server
+
+NanoOrch exposes a **Model Context Protocol (MCP) server** at `POST/GET/DELETE /mcp` using the `@modelcontextprotocol/sdk` `StreamableHTTPServerTransport`. This lets any MCP-compatible AI client (Claude Desktop, custom agents) remotely control a workspace through 8 structured tools, authenticated with workspace-scoped API keys.
+
+### Authentication
+
+MCP API keys are created per workspace by workspace admins via the **MCP** page in the sidebar or the REST API. Each key is:
+
+- Generated as `nano_mcp_<32-hex-chars>` (plaintext, shown once)
+- Stored as a SHA-256 hash in the `mcp_api_keys` table — the raw value is never persisted
+- Sent by clients as an HTTP `Authorization: Bearer nano_mcp_...` header on every request
+- Scoped to a single workspace — each session inherits the workspace ID of the matching key
+
+### Session Lifecycle
+
+```
+Client sends POST /mcp  (Authorization: Bearer <key>)
+    │
+    ▼
+mcpAuthMiddleware: SHA-256 hash key → lookup mcp_api_keys → update last_used_at
+    │
+    ▼
+new StreamableHTTPServerTransport({ sessionIdGenerator })
+new McpServer (createMcpServer(workspaceId)) → connect(transport)
+mcpSessions.set(sessionId, transport)
+    │
+    ▼
+Client sends GET /mcp?sessionId=<id>  → SSE stream opens
+    │
+    ▼
+Client sends DELETE /mcp?sessionId=<id>  → session closed, Map entry removed
+```
+
+Sessions are held in an in-memory `Map<sessionId, StreamableHTTPServerTransport>`. Session cleanup on `DELETE` calls `transport.close()`.
+
+### Tool Inventory
+
+| Tool | Input | What it does |
+|---|---|---|
+| `list_orchestrators` | — | Returns all orchestrators (id, name, status, provider, model, task counts) |
+| `list_agents` | — | Returns all agents (id, name, orchestratorId, provider, model, intent, active) |
+| `run_task` | `orchestratorId`, `agentId`, `input` | Creates a task and runs it via `executeTask`; returns output or error |
+| `get_task_status` | `taskId` | Returns status, input, output, error, and last 5 log entries |
+| `list_pending_approvals` | — | Lists all `pending` approval requests (id, action, impact) |
+| `approve_request` | `approvalId`, `decision`, `resolution?` | Resolves an approval as `approved` or `rejected` |
+| `trigger_pipeline` | `pipelineId` | Creates a pipeline run and calls `runPipeline()` |
+| `fire_scheduled_job` | `jobId` | Creates an immediate task from the job's prompt and orchestrator |
+
+### Storage
+
+`mcp_api_keys` table (created by `create_mcp_api_keys` incremental migration):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `varchar` (UUID) | Primary key |
+| `workspaceId` | `varchar` | Foreign key → workspaces |
+| `name` | `varchar` | Human-readable label |
+| `keyHash` | `varchar` | SHA-256 of the raw key |
+| `createdAt` | `timestamp` | Creation time |
+| `lastUsedAt` | `timestamp` | Set on every authenticated request |
+
+### Claude Desktop Integration
+
+The MCP page generates a ready-to-paste Claude Desktop config snippet. Users copy their raw API key, paste the config into `~/.config/claude/claude_desktop_config.json`, and Claude can immediately call all 8 tools against the workspace.
 
 ---
 

@@ -8,3 +8,4 @@ attached_*
 .env
 .env.local
 .env.*.local
+docs/

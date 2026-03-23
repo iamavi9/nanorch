@@ -161,7 +161,7 @@ export default function TasksPage({ orchestratorId, workspaceId }: Props) {
         <>
           <div className="space-y-2">
             {tasks.map((task) => {
-              const statusConfig = STATUS_CONFIG[task.status as keyof typeof STATUS_CONFIG ?? "pending"];
+              const statusConfig = STATUS_CONFIG[task.status as keyof typeof STATUS_CONFIG] ?? STATUS_CONFIG.pending;
               return (
                 <Link key={task.id} href={`/workspaces/${workspaceId}/orchestrators/${orchestratorId}/tasks/${task.id}`}>
                   <div className="flex items-center gap-3 p-4 rounded-lg border border-border bg-card hover:border-primary/40 cursor-pointer transition-colors group"

@@ -36,6 +36,7 @@
   <!-- Row 1: Access & Identity -->
   <div class="section-box" style="border-color:rgba(139,92,246,0.25); margin-bottom:10px;">
     <div class="section-title" style="color:#c4b5fd;">Access &amp; Identity</div>
+    <!-- Browser path -->
     <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
       <div class="chip" style="background:rgba(139,92,246,0.1); border-color:rgba(139,92,246,0.25);">
         <svg fill="none" stroke="#ddd6fe" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
@@ -55,6 +56,33 @@
       <div class="chip" style="background:rgba(139,92,246,0.1); border-color:rgba(139,92,246,0.25);">
         <svg fill="none" stroke="#ddd6fe" stroke-width="2" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         <div><div class="chip-label">API Gateway</div><div class="chip-sub">Session Auth · CSRF · Rate Limits</div></div>
+      </div>
+    </div>
+    <!-- MCP path -->
+    <div style="display:flex; gap:8px; align-items:center; margin-top:8px; padding-top:8px; border-top:1px solid rgba(139,92,246,0.1);">
+      <div style="font-size:9px; font-weight:700; color:rgba(167,139,250,0.5); text-transform:uppercase; letter-spacing:0.15em; white-space:nowrap;">MCP</div>
+      <div class="chip" style="background:rgba(99,102,241,0.12); border-color:rgba(99,102,241,0.3);">
+        <svg fill="none" stroke="#a5b4fc" stroke-width="2" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
+        <div><div class="chip-label">AI Client</div><div class="chip-sub">Claude Desktop · Custom Agents</div></div>
+      </div>
+      <div class="arrow-right"><svg width="16" height="16" fill="none" stroke="rgba(255,255,255,0.2)" stroke-width="2" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg></div>
+      <div class="chip" style="background:rgba(99,102,241,0.12); border-color:rgba(99,102,241,0.3);">
+        <svg fill="none" stroke="#a5b4fc" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <div><div class="chip-label">Bearer API Key</div><div class="chip-sub">nano_mcp_... · SHA-256 hashed</div></div>
+      </div>
+      <div class="arrow-right"><svg width="16" height="16" fill="none" stroke="rgba(255,255,255,0.2)" stroke-width="2" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg></div>
+      <div class="chip" style="background:rgba(99,102,241,0.12); border-color:rgba(99,102,241,0.3);">
+        <svg fill="none" stroke="#a5b4fc" stroke-width="2" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        <div><div class="chip-label">MCP Server /mcp</div><div class="chip-sub">HTTP/SSE · 8 workspace tools</div></div>
+      </div>
+      <div class="arrow-right"><svg width="16" height="16" fill="none" stroke="rgba(255,255,255,0.2)" stroke-width="2" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg></div>
+      <div style="display:flex; flex-wrap:wrap; gap:4px; max-width:320px;">
+        <span style="font-size:9px; color:rgba(167,139,250,0.7); background:rgba(99,102,241,0.1); border:1px solid rgba(99,102,241,0.2); border-radius:4px; padding:2px 6px;">run_task</span>
+        <span style="font-size:9px; color:rgba(167,139,250,0.7); background:rgba(99,102,241,0.1); border:1px solid rgba(99,102,241,0.2); border-radius:4px; padding:2px 6px;">list_agents</span>
+        <span style="font-size:9px; color:rgba(167,139,250,0.7); background:rgba(99,102,241,0.1); border:1px solid rgba(99,102,241,0.2); border-radius:4px; padding:2px 6px;">approve_request</span>
+        <span style="font-size:9px; color:rgba(167,139,250,0.7); background:rgba(99,102,241,0.1); border:1px solid rgba(99,102,241,0.2); border-radius:4px; padding:2px 6px;">trigger_pipeline</span>
+        <span style="font-size:9px; color:rgba(167,139,250,0.7); background:rgba(99,102,241,0.1); border:1px solid rgba(99,102,241,0.2); border-radius:4px; padding:2px 6px;">fire_scheduled_job</span>
+        <span style="font-size:9px; color:rgba(167,139,250,0.7); background:rgba(99,102,241,0.1); border:1px solid rgba(99,102,241,0.2); border-radius:4px; padding:2px 6px;">+ 3 more</span>
       </div>
     </div>
   </div>
@@ -241,10 +269,10 @@
 
   <!-- Footer -->
   <div style="margin-top:20px; display:flex; justify-content:space-between; align-items:center; color:rgba(255,255,255,0.2); font-size:9px;">
-    <span>Self-hosted · Docker · PostgreSQL · Express.js · React</span>
+    <span>Self-hosted · Docker · PostgreSQL · Express.js · React · MCP Server</span>
     <span style="display:flex; align-items:center; gap:6px;">
       <span style="width:6px; height:6px; border-radius:50%; background:#34d399; display:inline-block;"></span>
-      Production-ready · Multi-tenant · Enterprise RBAC
+      Production-ready · Multi-tenant · Enterprise RBAC · Remote AI Access
     </span>
   </div>
 

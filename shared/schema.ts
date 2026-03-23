@@ -9,7 +9,7 @@ export const orchestratorStatusEnum = pgEnum("orchestrator_status", ["active", "
 export const taskStatusEnum = pgEnum("task_status", ["pending", "running", "completed", "failed"]);
 export const channelTypeEnum = pgEnum("channel_type", ["webhook", "api", "slack", "teams", "google_chat", "generic_webhook"]);
 export const logLevelEnum = pgEnum("log_level", ["info", "warn", "error"]);
-export const cloudProviderEnum = pgEnum("cloud_provider", ["aws", "gcp", "azure", "ragflow", "jira", "github", "gitlab", "teams", "slack", "google_chat"]);
+export const cloudProviderEnum = pgEnum("cloud_provider", ["aws", "gcp", "azure", "ragflow", "jira", "github", "gitlab", "teams", "slack", "google_chat", "servicenow"]);
 
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -416,3 +416,16 @@ export const triggerEvents = pgTable("trigger_events", {
 });
 
 export type TriggerEvent = typeof triggerEvents.$inferSelect;
+
+// ── MCP API Keys ───────────────────────────────────────────────────────────────
+export const mcpApiKeys = pgTable("mcp_api_keys", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  keyHash: text("key_hash").notNull(),
+  createdBy: varchar("created_by").references(() => users.id, { onDelete: "set null" }),
+  lastUsedAt: timestamp("last_used_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type McpApiKey = typeof mcpApiKeys.$inferSelect;

@@ -28,6 +28,20 @@ version: "3.9"
 # ─────────────────────────────────────────────────────────────
 
 services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - nanoorch_net
+
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -108,13 +122,33 @@ services:
       # Example: SECCOMP_PROFILE=/etc/nanoorch/seccomp/nanoorch.json
       # A hardened profile is included at agent/seccomp/nanoorch.json.
       SECCOMP_PROFILE:  ${SECCOMP_PROFILE:-}
+      # DOCKER_PROXY_URL: full base URL that agent containers use to reach the
+      # NanoOrch inference proxy.  Defaults to http://host.docker.internal:3000/internal/proxy
+      # which relies on the --add-host host.docker.internal:host-gateway flag
+      # (requires Docker Engine >= 20.10).
+      # If you see "Connection error" in action-task logs, set this in your
+      # .env file and re-run docker compose up -d:
+      #   DOCKER_PROXY_URL=http://172.17.0.1:3000/internal/proxy
+      DOCKER_PROXY_URL: ${DOCKER_PROXY_URL}
+
+      # Redis — optional but recommended for session store and rate limiting.
+      # Sessions fall back to PostgreSQL and rate limits fall back to in-memory
+      # if this is unset.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
 
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # Mount the seccomp profile directory so SECCOMP_PROFILE path is visible
+      # inside the container (existsSync check) AND to the Docker daemon (same host path).
+      # If the directory does not exist on the host, Docker creates it empty and
+      # the executor will skip the seccomp flag automatically.
+      - /etc/nanoorch/seccomp:/etc/nanoorch/seccomp:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       # /api/auth/me is public and always returns 200 (null when unauthenticated)
@@ -128,6 +162,7 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
 
 networks:
   nanoorch_net:

@@ -173,9 +173,12 @@ export const CODE_INTERPRETER_TOOL: ToolDefinition = {
     "Supports Python, JavaScript, Bash, Ruby, R, Go, and Java. " +
     "Use this to run computations, parse data, generate reports, or demonstrate scripts. " +
     "The sandbox has no network access and no filesystem access beyond /tmp. " +
-    "Language notes: Go requires 'package main' and 'func main()'. " +
-    "Java uses single-source-file execution — write a class with a main method (class name need not match filename). " +
-    "R uses Rscript; use print() to display values.",
+    "CRITICAL — output rules (scripts do NOT behave like a REPL; bare expressions produce no output): " +
+    "Python: always use print() for every value you want to show — e.g. print(result), print(hash_value). A bare variable name on the last line produces NO output. " +
+    "JavaScript: always use console.log() — e.g. console.log(result). A bare expression produces NO output. " +
+    "Bash: use echo. Ruby: use puts or p. R: use print() or cat(). " +
+    "Go requires 'package main' and 'func main()'. " +
+    "Java uses single-source-file execution — write a class with a main method (class name need not match filename).",
   parameters: {
     type: "object",
     properties: {
@@ -186,7 +189,7 @@ export const CODE_INTERPRETER_TOOL: ToolDefinition = {
       },
       code: {
         type: "string",
-        description: "The code to execute. Print/output results to stdout.",
+        description: "The code to execute. Always use explicit print/log statements to produce output — bare expressions at the end of a script are silently discarded.",
       },
     },
     required: ["language", "code"],
@@ -580,6 +583,133 @@ export const GOOGLE_CHAT_TOOLS: ToolDefinition[] = [
   },
 ];
 
+export const SERVICENOW_TOOLS: ToolDefinition[] = [
+  {
+    name: "servicenow_search_records",
+    description: "Search any ServiceNow table using an encoded query string. Returns records with display values.",
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "ServiceNow table name, e.g. incident, sc_req_item, change_request, cmdb_ci" },
+        query: { type: "string", description: "Encoded query string, e.g. active=true^priority=1 or number=INC0012345" },
+        limit: { type: "string", description: "Maximum number of records to return (default 10, max 50)" },
+        fields: { type: "string", description: "Comma-separated field names to return (optional — returns key fields by default)" },
+      },
+      required: ["table", "query"],
+    },
+  },
+  {
+    name: "servicenow_get_incident",
+    description: "Get a ServiceNow incident by its number (INC...) or sys_id. Returns full incident details including description, state, priority, assignment, and work notes.",
+    parameters: {
+      type: "object",
+      properties: {
+        identifier: { type: "string", description: "Incident number (e.g. INC0012345) or sys_id (32-char hex)" },
+      },
+      required: ["identifier"],
+    },
+  },
+  {
+    name: "servicenow_create_incident",
+    description: "Create a new ServiceNow incident. Returns the incident number, sys_id, and link.",
+    parameters: {
+      type: "object",
+      properties: {
+        short_description: { type: "string", description: "Brief one-line description of the incident (required)" },
+        description: { type: "string", description: "Full description of the issue (optional)" },
+        urgency: { type: "string", description: "Urgency: 1 (High), 2 (Medium), 3 (Low)", enum: ["1", "2", "3"] },
+        impact: { type: "string", description: "Impact: 1 (High), 2 (Medium), 3 (Low)", enum: ["1", "2", "3"] },
+        category: { type: "string", description: "Incident category (e.g. software, hardware, network — optional)" },
+        assignment_group: { type: "string", description: "Name or sys_id of the group to assign the incident to (optional)" },
+        caller_id: { type: "string", description: "Username or sys_id of the person reporting the incident (optional)" },
+        work_notes: { type: "string", description: "Initial work note to add (optional)" },
+      },
+      required: ["short_description"],
+    },
+  },
+  {
+    name: "servicenow_update_record",
+    description: "Update fields on any ServiceNow record by table and sys_id. Use this to change state, assignment, resolution notes, etc.",
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "ServiceNow table name, e.g. incident, sc_req_item, change_request" },
+        sys_id: { type: "string", description: "The sys_id of the record to update (32-char hex)" },
+        fields: { type: "string", description: "JSON object string of field names and new values, e.g. {\"state\":\"6\",\"close_notes\":\"Resolved via automation\"}" },
+      },
+      required: ["table", "sys_id", "fields"],
+    },
+  },
+  {
+    name: "servicenow_add_work_note",
+    description: "Add a work note (internal comment visible to agents only) to any ServiceNow record — incident, RITM, change request, etc.",
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "ServiceNow table name, e.g. incident, sc_req_item, change_request" },
+        sys_id: { type: "string", description: "The sys_id of the record" },
+        work_note: { type: "string", description: "The work note text to add" },
+      },
+      required: ["table", "sys_id", "work_note"],
+    },
+  },
+  {
+    name: "servicenow_get_ritm",
+    description: "Get a ServiceNow Requested Item (RITM) by its number (RITM...) or sys_id. Returns fulfilment stage, variables (form answers), and parent request details.",
+    parameters: {
+      type: "object",
+      properties: {
+        identifier: { type: "string", description: "RITM number (e.g. RITM0012345) or sys_id (32-char hex)" },
+      },
+      required: ["identifier"],
+    },
+  },
+  {
+    name: "servicenow_create_ritm",
+    description: "Submit a ServiceNow Service Catalog item order. Creates a Request (REQ) and one or more Requested Items (RITMs) for fulfilment. Returns the REQ number and RITM sys_id.",
+    parameters: {
+      type: "object",
+      properties: {
+        catalog_item_sys_id: { type: "string", description: "The sys_id of the catalog item to order. Use servicenow_get_catalog_items to find available items." },
+        variables: { type: "string", description: "JSON object string of variable name-value pairs for the catalog item form, e.g. {\"repo\":\"backend-api\",\"role\":\"write\"}" },
+        requested_for: { type: "string", description: "Username or sys_id of the person the item is being requested for (optional — defaults to the integration user)" },
+        quantity: { type: "string", description: "Number of items to order (default 1)" },
+      },
+      required: ["catalog_item_sys_id"],
+    },
+  },
+  {
+    name: "servicenow_create_change_request",
+    description: "Create a ServiceNow change request. Returns the change number and sys_id.",
+    parameters: {
+      type: "object",
+      properties: {
+        short_description: { type: "string", description: "Brief description of the change (required)" },
+        description: { type: "string", description: "Full description including justification and implementation plan (optional)" },
+        type: { type: "string", description: "Change type: standard, normal, emergency", enum: ["standard", "normal", "emergency"] },
+        assignment_group: { type: "string", description: "Name or sys_id of the group responsible (optional)" },
+        risk: { type: "string", description: "Risk level: 1 (High), 2 (Medium), 3 (Low), 4 (Very Low)", enum: ["1", "2", "3", "4"] },
+        start_date: { type: "string", description: "Planned start datetime in ISO 8601 format (optional)" },
+        end_date: { type: "string", description: "Planned end datetime in ISO 8601 format (optional)" },
+      },
+      required: ["short_description"],
+    },
+  },
+  {
+    name: "servicenow_get_catalog_items",
+    description: "List available ServiceNow Service Catalog items. Use this to find catalog_item_sys_id values for servicenow_create_ritm.",
+    parameters: {
+      type: "object",
+      properties: {
+        search: { type: "string", description: "Search term to filter catalog items by name (optional)" },
+        category: { type: "string", description: "Category name or sys_id to filter by (optional)" },
+        limit: { type: "string", description: "Maximum results to return (default 20)" },
+      },
+      required: [],
+    },
+  },
+];
+
 export const ALL_TOOLS: Record<string, ToolDefinition[]> = {
   aws: AWS_TOOLS,
   gcp: GCP_TOOLS,
@@ -591,9 +721,10 @@ export const ALL_TOOLS: Record<string, ToolDefinition[]> = {
   teams: TEAMS_TOOLS,
   slack: SLACK_TOOLS,
   google_chat: GOOGLE_CHAT_TOOLS,
+  servicenow: SERVICENOW_TOOLS,
 };
 
-export function getToolsForProvider(cloudProvider: "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "slack" | "google_chat"): ToolDefinition[] {
+export function getToolsForProvider(cloudProvider: "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "slack" | "google_chat" | "servicenow"): ToolDefinition[] {
   return ALL_TOOLS[cloudProvider] ?? [];
 }
 
@@ -654,10 +785,10 @@ export function getToolByName(name: string): ToolDefinition | undefined {
   if (name === "code_interpreter") return CODE_INTERPRETER_TOOL;
   if (name === "request_approval") return REQUEST_APPROVAL_TOOL;
   if (name === "spawn_agent") return SPAWN_AGENT_TOOL;
-  return [...AWS_TOOLS, ...GCP_TOOLS, ...AZURE_TOOLS, ...RAGFLOW_TOOLS, ...JIRA_TOOLS, ...GITHUB_TOOLS, ...GITLAB_TOOLS, ...TEAMS_TOOLS, ...SLACK_TOOLS, ...GOOGLE_CHAT_TOOLS].find((t) => t.name === name);
+  return [...AWS_TOOLS, ...GCP_TOOLS, ...AZURE_TOOLS, ...RAGFLOW_TOOLS, ...JIRA_TOOLS, ...GITHUB_TOOLS, ...GITLAB_TOOLS, ...TEAMS_TOOLS, ...SLACK_TOOLS, ...GOOGLE_CHAT_TOOLS, ...SERVICENOW_TOOLS].find((t) => t.name === name);
 }
 
-export function detectProviderFromToolName(name: string): "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "slack" | "google_chat" | "sandbox" | "approval" | null {
+export function detectProviderFromToolName(name: string): "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "slack" | "google_chat" | "servicenow" | "sandbox" | "approval" | null {
   if (name === "code_interpreter") return "sandbox";
   if (name === "request_approval") return "approval";
   if (name.startsWith("aws_")) return "aws";
@@ -670,5 +801,6 @@ export function detectProviderFromToolName(name: string): "aws" | "gcp" | "azure
   if (name.startsWith("teams_")) return "teams";
   if (name.startsWith("slack_")) return "slack";
   if (name.startsWith("google_chat_")) return "google_chat";
+  if (name.startsWith("servicenow_")) return "servicenow";
   return null;
 }
