@@ -26,6 +26,7 @@ A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, 
 - **Code execution** — agents write and run Python/JavaScript directly from chat inside a gVisor (`runsc`) sandbox container; fully network-isolated, read-only filesystem, memory/CPU capped
 - **Cloud integrations** — AWS, GCP, Azure with AES-256-GCM encrypted credentials and agentic tool calling; **messaging integrations** — MS Teams, Slack, Google Chat usable as agent tools (send messages, cards, notifications from any agent task)
 - **DevTools integrations** — Jira (7 tools: search/create/update issues, sprints, comments), GitHub (7 tools: repos, issues, PRs, Actions), GitLab (8 tools: issues, MRs, pipelines, triggers)
+- **ITSM integrations** — ServiceNow (9 tools: incidents, RITMs, change requests, Service Catalog orders, table search, work notes; Basic Auth with `instanceUrl` + `username` + `password`)
 - **RAGFlow integration** — query knowledge bases as a tool, or auto-inject context before every AI response (Context mode)
 - **Intent classification** — LLM-based classifier routes each message to action / code execution / conversational path automatically
 - **Chat UI** — per-workspace chat with `@agent` mention autocomplete (keyboard ↑↓ navigation, Enter/Tab to select) and live streaming responses
@@ -427,7 +428,7 @@ Global admins can restrict how much each workspace can use. On the **Workspaces*
 | Group | What it restricts |
 |-------|------------------|
 | AI Providers | Which of openai / anthropic / gemini / ollama can be selected when creating an orchestrator |
-| Cloud Integrations | Which of aws / gcp / azure / jira / github / gitlab / ragflow / teams / slack / google_chat can be added as integrations |
+| Cloud Integrations | Which of aws / gcp / azure / jira / github / gitlab / ragflow / teams / slack / google_chat / servicenow can be added as integrations |
 | Channel Types | Which outbound channel types (slack / teams / google_chat / generic_webhook) can be created |
 
 When a limit is hit the API returns `409 Quota exceeded`; when a disallowed provider is used it returns `403 Forbidden`.

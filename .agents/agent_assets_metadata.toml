@@ -30,3 +30,9 @@ id = "eTgPilW2czB3kVQlv1_O6"
 uri = "file://client/public/NanoOrch-CambridgeTech.pptx"
 type = "slides"
 title = "NanoOrch — Cambridge Technology Template"
+
+[[outputs]]
+id = "oFdQHtyNfm_Yn__WbwmhE"
+uri = "file://docs/screenshots/gitlab-mr-flow.png"
+type = "image"
+title = "GitLab MR → NanoOrch → Google Chat — Architecture Diagram"

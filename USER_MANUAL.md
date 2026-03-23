@@ -205,6 +205,18 @@ Depending on which integrations your administrator has set up, agents in your wo
 @devbot create an issue: "Update dependencies" in project 123
 ```
 
+### ServiceNow (ITSM)
+
+```
+@itsm-bot show me the latest P1 incidents
+@itsm-bot create an incident: "Login page down" — impact High, urgency High
+@itsm-bot what is the status of incident INC0012345?
+@itsm-bot add a work note to INC0012345: "Root cause identified — DB connection pool exhausted"
+@itsm-bot show me all open change requests for this week
+@itsm-bot list available catalog items related to VPN access
+@itsm-bot submit a catalog order for item <sys_id> on behalf of john.doe
+```
+
 ### Knowledge base (RAGFlow)
 
 If your administrator has connected a RAGFlow knowledge base, the agent automatically searches it before every response — you do not need to ask it to. See section 10 for details.

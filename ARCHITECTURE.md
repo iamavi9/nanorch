@@ -127,7 +127,8 @@ NanoOrch is a **self-hosted, multi-tenant AI agent orchestrator**. It lets teams
 | ORM | Drizzle ORM | latest |
 | Query builder | drizzle-orm/pg-core | latest |
 | Database driver | pg (node-postgres) | latest |
-| Session store | connect-pg-simple | latest |
+| Session store | connect-pg-simple (PostgreSQL, default) or connect-redis (Redis, when `REDIS_URL` set) | latest |
+| Redis client | ioredis (with `makeNodeRedisCompat()` shim in `server/lib/redis.ts`) | latest |
 | Password hashing | Node.js crypto (scrypt) | built-in |
 | Encryption | Node.js crypto (AES-256-GCM) | built-in |
 | Rate limiting | express-rate-limit | latest |
@@ -460,10 +461,18 @@ process start
 
 ### Session Management
 
-Sessions are stored in PostgreSQL via `connect-pg-simple`. The `user_sessions` table is created by an INCREMENTAL_MIGRATION (not Drizzle-managed). Session configuration:
+Sessions default to PostgreSQL via `connect-pg-simple`. When `REDIS_URL` is set, sessions use `connect-redis` backed by `ioredis`. Because connect-redis expects the node-redis v4 API and ioredis has a different calling convention, `server/lib/redis.ts` exports `makeNodeRedisCompat(ioredisClient)` — a compatibility shim that:
+
+- Translates `SET key value {EX: n}` object-style options to positional `SET key value EX n` args
+- Adds an `expire(key, ttl)` method required by connect-redis's `touch()` calls
+- Exposes `get`, `del`, `scan`, and `mGet` pass-throughs
+
+The same file exports `RedisRateLimitStore` (a custom express-rate-limit store backed by Redis) with a `public prefix` field to satisfy the `Store` interface.
+
+The `user_sessions` table (PostgreSQL fallback path) is created by an INCREMENTAL_MIGRATION (not Drizzle-managed). Session configuration:
 
 ```
-store:   connect-pg-simple (PostgreSQL-backed)
+store:   connect-pg-simple (default) | connect-redis (when REDIS_URL is set)
 secret:  SESSION_SECRET env var
 name:    nanoorch_session
 maxAge:  7 days
@@ -855,6 +864,7 @@ Decryption happens in-process immediately before a tool call. Credentials are ne
 | Teams | Bot Framework | `appId`, `appPassword` (comms inbound); also a cloud integration tool: `webhookUrl` |
 | Slack | Slack Web API | `botToken`, optional `defaultChannel` (comms inbound + cloud integration tools) |
 | Google Chat | Webhook + Events | `webhookUrl` (cloud integration tools + comms inbound), optional `verificationToken` |
+| ServiceNow | Custom HTTP client (Basic Auth) | `instanceUrl`, `username`, `password` |
 
 ---
 
@@ -933,6 +943,22 @@ Tool definitions follow the JSON Schema format and are passed to AI providers in
 | `ragflow_list_datasets` | List available knowledge base datasets |
 | `ragflow_query_dataset` | Query a dataset with a natural language question |
 | `ragflow_query_multiple_datasets` | Query multiple datasets simultaneously |
+
+### ServiceNow Tools (ITSM)
+
+| Tool Name | Description |
+|---|---|
+| `servicenow_search_records` | Search any ServiceNow table using an encoded query string |
+| `servicenow_get_incident` | Retrieve a single incident record by sys_id |
+| `servicenow_create_incident` | Create a new incident with caller, category, impact, urgency, and description |
+| `servicenow_update_record` | Update any field on any ServiceNow record by table + sys_id |
+| `servicenow_add_work_note` | Append a work note to any record (incident, change, RITM, etc.) |
+| `servicenow_get_ritm` | Retrieve a Requested Item (RITM) record by sys_id |
+| `servicenow_create_ritm` | Submit a Service Catalog order and return the resulting RITM sys_id |
+| `servicenow_create_change_request` | Open a new Change Request with type, risk, impact, and justification |
+| `servicenow_get_catalog_items` | List active Service Catalog items (optionally filtered by search query) |
+
+Credential fields: `instanceUrl`, `username`, `password`. Requires ITIL + catalog roles in ServiceNow. Provider key: `servicenow`. Category: ITSM.
 
 ### Built-In Tools
 
@@ -1526,6 +1552,7 @@ Stage 2: node:20-alpine (runtime)
 | `AI_INTEGRATIONS_OPENAI_BASE_URL` | No | — | OpenAI-compatible base URL override |
 | `AI_INTEGRATIONS_ANTHROPIC_BASE_URL` | No | — | Anthropic base URL override |
 | `AI_INTEGRATIONS_GEMINI_BASE_URL` | No | — | Gemini base URL override |
+| `REDIS_URL` | No | — | Redis connection string (e.g. `redis://localhost:6379`). When set, sessions and rate-limit counters use Redis via the ioredis shim instead of PostgreSQL |
 
 All variables above also support a `*_FILE` variant (e.g. `DATABASE_URL_FILE`) for Docker secrets.
 

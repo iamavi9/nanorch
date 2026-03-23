@@ -251,6 +251,16 @@ Integrations let agents call real AWS, GCP, Azure, Jira, GitHub, GitLab, RAGFlow
 |---|---|
 | **RAGFlow** | Base URL (e.g. `http://ragflow:9380`), API Key |
 
+### ITSM
+
+ServiceNow integrations let agents open incidents, track RITMs, submit Change Requests, and search any ServiceNow table.
+
+| Provider | Credentials needed |
+|---|---|
+| **ServiceNow** | Instance URL (e.g. `https://your-instance.service-now.com`), Username, Password |
+
+> ServiceNow credentials must belong to a user with the **ITIL** role (for incidents/changes) and the **catalog** role (for RITM/catalog operations). The integration uses Basic Auth over HTTPS.
+
 ### Messaging
 
 Messaging integrations give agents the ability to send messages, notifications, and cards to Slack channels, Teams channels, or Google Chat spaces — as part of any task, autonomously. For example, a heartbeat agent can call `slack_send_notification` to post a status update, or a DevOps agent can call `google_chat_send_card` to send a formatted incident report.
@@ -286,6 +296,7 @@ Click the **Edit** (pencil) button on any integration card to rename it, switch 
 | GitHub | `github_list_repos`, `github_list_issues`, `github_get_issue`, `github_create_issue`, `github_list_pull_requests`, `github_create_pull_request`, `github_list_workflow_runs` |
 | GitLab | `gitlab_list_projects`, `gitlab_list_issues`, `gitlab_get_issue`, `gitlab_create_issue`, `gitlab_list_merge_requests`, `gitlab_create_merge_request`, `gitlab_list_pipelines`, `gitlab_trigger_pipeline` |
 | RAGFlow | `ragflow_list_datasets`, `ragflow_query_dataset`, `ragflow_query_multiple_datasets` |
+| ServiceNow | `servicenow_search_records`, `servicenow_get_incident`, `servicenow_create_incident`, `servicenow_update_record`, `servicenow_add_work_note`, `servicenow_get_ritm`, `servicenow_create_ritm`, `servicenow_create_change_request`, `servicenow_get_catalog_items` |
 | Teams | `teams_send_message` |
 | Slack | `slack_send_message`, `slack_send_notification` |
 | Google Chat | `google_chat_send_message`, `google_chat_send_card` |
