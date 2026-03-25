@@ -152,6 +152,100 @@ A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, 
 
 ---
 
+## System Requirements
+
+### Development
+
+| Requirement | Version / Notes |
+|---|---|
+| **Node.js** | 20 LTS or later |
+| **npm** | 10+ (bundled with Node 20) |
+| **PostgreSQL** | 15 or later |
+| **Docker** | 24+ with Docker Compose v2 — optional; required for container-isolated task execution and the code execution sandbox |
+| **gVisor (`runsc`)** | Optional; required for gVisor kernel isolation on the code sandbox (`SANDBOX_RUNTIME=runsc`). Skip it and set `SANDBOX_RUNTIME=runc` to use standard Docker instead |
+| **RAM** | 2 GB minimum |
+| **Disk** | 10 GB free (more if you build agent Docker images locally) |
+| **OS** | macOS, Linux, or WSL2 on Windows |
+
+**AI provider (at least one):**
+- OpenAI API key (`AI_INTEGRATIONS_OPENAI_API_KEY`)
+- Anthropic API key (`AI_INTEGRATIONS_ANTHROPIC_API_KEY`)
+- Gemini API key (`AI_INTEGRATIONS_GEMINI_API_KEY`)
+- Or a locally-running [Ollama](https://ollama.com/) instance (no key required)
+
+**Environment variables required at startup:**
+```
+DATABASE_URL        # PostgreSQL connection string
+SESSION_SECRET      # Random string ≥ 32 characters
+ADMIN_PASSWORD      # First-boot admin password
+```
+
+**To start in development:**
+```bash
+npm install
+npm run db:migrate  # applies incremental migrations
+npm run dev         # starts Express + Vite on port 3000
+```
+
+---
+
+### Production
+
+**Recommended minimum instance** — AWS EC2 `t3.small` (2 vCPU / 2 GB RAM) or equivalent; `t3.medium` or larger if you enable Docker-isolated execution for every action task.
+
+| Requirement | Version / Notes |
+|---|---|
+| **OS** | Ubuntu 22.04 LTS or 24.04 LTS (recommended); any Linux distro with Docker support |
+| **Docker Engine** | 24+ |
+| **Docker Compose** | v2 (`docker compose` — not the older `docker-compose` v1) |
+| **gVisor (`runsc`)** | Recommended for production; provides kernel-level syscall isolation for the code sandbox and agent containers. Required if `SANDBOX_RUNTIME=runsc` or `AGENT_RUNTIME=runsc` |
+| **PostgreSQL** | 15+ — managed (AWS RDS, Supabase) or self-hosted via Docker Compose |
+| **Redis** | Optional; set `REDIS_URL` to use Redis-backed sessions and rate-limit store instead of the default in-process / PostgreSQL stores. Required for multi-node / load-balanced deployments |
+| **Nginx** | Recommended reverse proxy for TLS termination and port 80/443 exposure |
+| **RAM** | 2 GB minimum; 4 GB recommended when Docker-isolated action tasks and code sandbox are both active |
+| **Disk** | 20 GB free; allow extra for Docker image layers (`nanoorch-agent`, `nanoorch-sandbox`) and PostgreSQL data volume |
+| **CPU** | 2 vCPU minimum; each concurrent Docker-isolated task spawns a container, so more cores help under load |
+
+**Network / firewall:**
+
+| Port | Required | Purpose |
+|------|----------|---------|
+| 22 | Dev/ops access | SSH |
+| 3000 | Yes (or proxied) | NanoOrch application |
+| 80 / 443 | Recommended | Nginx reverse proxy with TLS |
+| 5432 | Internal only | PostgreSQL (do not expose publicly) |
+| 6379 | Internal only | Redis, if used (do not expose publicly) |
+| 11434 | Internal only | Ollama inference, if self-hosted |
+
+**External dependencies (as needed):**
+
+| Feature | Dependency |
+|---|---|
+| OpenAI / Anthropic / Gemini models | API key + internet egress to provider endpoint |
+| Ollama on-prem inference | Ollama process reachable from the NanoOrch container (same host: `http://host.docker.internal:11434`) |
+| Two-way Slack inbound | Slack App with Bot Token + Signing Secret; NanoOrch events endpoint must be reachable from Slack servers (public URL or tunnel) |
+| Two-way Teams inbound | Azure Bot Framework App Registration (App ID + Secret); NanoOrch events endpoint must be reachable from Microsoft |
+| Two-way Google Chat inbound | Google Cloud project with Chat API; NanoOrch events endpoint must be publicly reachable |
+| SSO (OIDC) | Identity provider with OIDC discovery URL + client credentials; NanoOrch callback URL must be registered with the IdP |
+| SSO (SAML 2.0) | IdP SSO URL + public certificate; NanoOrch ACS URL must be registered as the Assertion Consumer Service |
+| Event-driven triggers | GitHub / GitLab / Jira webhook delivery must be able to reach the NanoOrch host |
+| Docker-isolated execution | Docker socket at `/var/run/docker.sock` mounted into the NanoOrch container (see `docker-compose.yml`) |
+
+**Key environment variables for production (beyond dev minimums):**
+
+```env
+ENCRYPTION_KEY=<32-byte hex>        # AES-256-GCM key for integration credentials — generate once, never rotate
+COOKIE_SECURE=true                  # Required when behind HTTPS Nginx
+APP_URL=https://nanoorch.your-company.com   # Required for SSO callback and webhook URLs
+DOCKER_SOCKET=/var/run/docker.sock  # Enable Docker-isolated task execution
+SANDBOX_RUNTIME=runsc               # gVisor for code sandbox (or runc if gVisor not installed)
+AGENT_RUNTIME=runsc                 # gVisor for action-task agent containers (optional but recommended)
+SECCOMP_PROFILE=/etc/nanoorch/seccomp/nanoorch.json  # Syscall allowlist (optional, high-security)
+REDIS_URL=redis://localhost:6379    # Enable Redis sessions (required for multi-node)
+```
+
+---
+
 ## Deploying on EC2
 
 ### 1. Launch and connect to your instance

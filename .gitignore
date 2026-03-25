@@ -8,3 +8,5 @@ attached_*
 .env
 .env.local
 .env.*.local
+artifacts
+attached_assets
