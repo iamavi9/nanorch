@@ -181,6 +181,8 @@ export const scheduledJobs = pgTable("scheduled_jobs", {
   cronExpression: varchar("cron_expression").notNull(),
   timezone: varchar("timezone").default("UTC"),
   isActive: boolean("is_active").default(true),
+  intent: varchar("intent"),
+  bypassApproval: boolean("bypass_approval").default(false),
   notifyChannelId: varchar("notify_channel_id"),
   lastRunAt: timestamp("last_run_at"),
   nextRunAt: timestamp("next_run_at"),
@@ -394,6 +396,7 @@ export const eventTriggers = pgTable("event_triggers", {
   secretToken: text("secret_token"),
   filterConfig: jsonb("filter_config").default({}),
   isActive: boolean("is_active").default(true),
+  bypassApproval: boolean("bypass_approval").default(false),
   notifyChannelId: varchar("notify_channel_id"),
   createdAt: timestamp("created_at").defaultNow(),
 });

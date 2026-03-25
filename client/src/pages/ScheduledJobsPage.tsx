@@ -10,7 +10,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Clock, Plus, Trash2, Loader2, Play, Pencil, CheckCircle2, XCircle, PauseCircle, ExternalLink } from "lucide-react";
+import { Clock, Plus, Trash2, Loader2, Play, Pencil, CheckCircle2, XCircle, PauseCircle, ExternalLink, ShieldOff } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
 import type { ScheduledJob } from "@shared/schema";
 import type { Orchestrator, Agent } from "@shared/schema";
 
@@ -70,6 +71,7 @@ const EMPTY_FORM = {
   prompt: "",
   cronExpression: "0 9 * * *",
   timezone: "UTC",
+  bypassApproval: false,
   notifyChannelId: "",
 };
 
@@ -200,6 +202,18 @@ function JobForm({
         <p className="text-xs text-muted-foreground">Channel to notify when this job completes or fails.</p>
       </div>
 
+      <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-2">
+        <div>
+          <p className="text-sm font-medium">Skip approval gates</p>
+          <p className="text-xs text-muted-foreground">Tasks created by this job bypass approval requests.</p>
+        </div>
+        <Switch
+          data-testid="switch-job-bypass-approval"
+          checked={form.bypassApproval}
+          onCheckedChange={(v) => setForm({ ...form, bypassApproval: v })}
+        />
+      </div>
+
       <div className="flex justify-end gap-2 pt-1">
         <Button variant="outline" onClick={onCancel}>Cancel</Button>
         <Button data-testid="button-save-job" onClick={() => onSave(form)} disabled={isPending}>
@@ -323,6 +337,7 @@ export default function ScheduledJobsPage({ workspaceId }: Props) {
                 prompt: editingJob.prompt,
                 cronExpression: editingJob.cronExpression,
                 timezone: editingJob.timezone ?? "UTC",
+                bypassApproval: (editingJob as any).bypassApproval ?? false,
                 notifyChannelId: (editingJob as any).notifyChannelId ?? "",
               }}
               agents={agents}
@@ -359,7 +374,7 @@ export default function ScheduledJobsPage({ workspaceId }: Props) {
                 <CardHeader className="pb-2">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <CardTitle className="text-base flex items-center gap-2">
+                      <CardTitle className="text-base flex items-center gap-2 flex-wrap">
                         {job.name}
                         <Badge variant={job.isActive ? "default" : "secondary"} className="text-xs" data-testid={`status-job-${job.id}`}>
                           {job.isActive ? (
@@ -368,6 +383,16 @@ export default function ScheduledJobsPage({ workspaceId }: Props) {
                             <><PauseCircle className="w-3 h-3 mr-1" />Paused</>
                           )}
                         </Badge>
+                        {(job as any).bypassApproval && (
+                          <Badge variant="outline" className="text-xs text-orange-600 border-orange-400 gap-1" data-testid={`badge-bypass-${job.id}`}>
+                            <ShieldOff className="w-3 h-3" />No gates
+                          </Badge>
+                        )}
+                        {(job as any).intent && (job as any).intent !== "conversational" && (
+                          <Badge variant="outline" className="text-xs" data-testid={`badge-intent-${job.id}`}>
+                            {(job as any).intent === "action" ? "Docker" : "Sandbox"}
+                          </Badge>
+                        )}
                       </CardTitle>
                       <CardDescription className="text-xs mt-0.5">
                         {agent ? `${agent.name} · ${agent.orchestratorName}` : job.agentId}

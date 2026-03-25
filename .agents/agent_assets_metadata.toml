@@ -36,3 +36,9 @@ id = "oFdQHtyNfm_Yn__WbwmhE"
 uri = "file://docs/screenshots/gitlab-mr-flow.png"
 type = "image"
 title = "GitLab MR → NanoOrch → Google Chat — Architecture Diagram"
+
+[[outputs]]
+id = "dhgzVsogT5SRzu2BrsW-Z"
+uri = "file://NanoOrch_Brochure.pdf"
+type = "pdf"
+title = "NanoOrch Product Brochure — Cambridge (v3)"

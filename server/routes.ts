@@ -942,6 +942,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
               agentId: originalTask.agentId ?? undefined,
               channelId: originalTask.channelId ?? undefined,
               commsThreadId: originalTask.commsThreadId ?? undefined,
+              intent: (originalTask.intent as "action" | "code_execution" | "conversational") ?? undefined,
               input: `${originalTask.input}\n\n[System: Approval has been granted for action "${approval.action}". Please proceed with the approved action.]`,
               status: "pending",
               priority: originalTask.priority ?? 5,
@@ -1813,8 +1814,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
     const { cronExpression, timezone } = parsed.data;
     if (!validateCron(cronExpression)) return res.status(400).json({ message: "Invalid cron expression" });
+    const orchForClassify = await storage.getOrchestrator(parsed.data.orchestratorId);
+    const classifiedIntent = orchForClassify
+      ? await classifyIntent(parsed.data.prompt, orchForClassify.provider, orchForClassify.model, orchForClassify.baseUrl)
+      : "conversational";
     const nextRunAt = computeNextRun(cronExpression, timezone ?? "UTC");
-    const job = await storage.createScheduledJob({ ...parsed.data, ...(nextRunAt ? { nextRunAt } : {}) });
+    const job = await storage.createScheduledJob({ ...parsed.data, intent: classifiedIntent, ...(nextRunAt ? { nextRunAt } : {}) });
     registerJob(job);
     res.json(job);
   });
@@ -1835,8 +1840,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const effectiveCron = cronExpression ?? existing.cronExpression;
     const effectiveTz = timezone ?? existing.timezone ?? "UTC";
     const nextRunAt = computeNextRun(effectiveCron, effectiveTz);
+    let intentUpdate: { intent?: string } = {};
+    if (rest.prompt) {
+      const effectiveOrchId = rest.orchestratorId ?? existing.orchestratorId;
+      const orchForReclassify = await storage.getOrchestrator(effectiveOrchId);
+      if (orchForReclassify) {
+        intentUpdate.intent = await classifyIntent(rest.prompt, orchForReclassify.provider, orchForReclassify.model, orchForReclassify.baseUrl);
+      }
+    }
     const job = await storage.updateScheduledJob((req.params.id as string), {
       ...rest,
+      ...intentUpdate,
       ...(cronExpression ? { cronExpression } : {}),
       ...(timezone ? { timezone } : {}),
       ...(nextRunAt ? { nextRunAt } : {}),
@@ -1918,7 +1932,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       agentId: job.agentId,
       input: job.prompt,
       status: "pending",
-      intent: "conversational",
+      intent: (job.intent as "action" | "code_execution" | "conversational") ?? "conversational",
+      bypassApproval: job.bypassApproval ?? false,
       priority: 5,
     });
     await storage.updateScheduledJob(job.id, { lastRunAt: new Date(), lastTaskId: task.id });
@@ -2095,7 +2110,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   app.post("/api/workspaces/:wid/triggers", requireAuth, requireWorkspaceAdmin, async (req, res) => {
-    const { orchestratorId, agentId, name, source, eventTypes, promptTemplate, secretToken, filterConfig, isActive } = req.body;
+    const { orchestratorId, agentId, name, source, eventTypes, promptTemplate, secretToken, filterConfig, isActive, bypassApproval } = req.body;
     if (!orchestratorId || !agentId || !name || !source || !promptTemplate) {
       return res.status(400).json({ error: "orchestratorId, agentId, name, source and promptTemplate are required" });
     }
@@ -2110,6 +2125,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       secretToken: secretToken ?? null,
       filterConfig: filterConfig ?? {},
       isActive: isActive ?? true,
+      bypassApproval: bypassApproval ?? false,
     });
     res.status(201).json(trigger);
   });
@@ -2142,7 +2158,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Webhook trigger helpers ───────────────────────────────────────────────
-  async function fireTrigger(trigger: { id: string; orchestratorId: string; agentId: string; source: string; eventTypes: string[] | null; promptTemplate: string }, eventType: string, payload: Record<string, unknown>) {
+  async function fireTrigger(trigger: { id: string; orchestratorId: string; agentId: string; source: string; eventTypes: string[] | null; promptTemplate: string; bypassApproval?: boolean | null }, eventType: string, payload: Record<string, unknown>) {
     const types = trigger.eventTypes ?? [];
     const matched = types.length === 0 || types.some((t) => eventType.toLowerCase().includes(t.toLowerCase()) || t === "*");
 
@@ -2166,11 +2182,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       await storage.logTriggerEvent({ triggerId: trigger.id, source: trigger.source, eventType, payloadPreview: JSON.stringify(payload).slice(0, 400), matched: true, error: "Orchestrator not found" });
       return;
     }
+    const intent = await classifyIntent(prompt, orchestrator.provider, orchestrator.model, orchestrator.baseUrl);
     const task = await storage.createTask({
       orchestratorId: trigger.orchestratorId,
       agentId: trigger.agentId,
       input: prompt,
       status: "pending",
+      intent,
+      bypassApproval: trigger.bypassApproval ?? false,
       priority: 5,
     });
     await executeTask(task.id);

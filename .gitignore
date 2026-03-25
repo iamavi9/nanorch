@@ -4,9 +4,8 @@ dist
 server/public
 vite.config.ts.*
 *.tar.gz
-attached_*
+attached_assets
+artifacts
 .env
 .env.local
 .env.*.local
-artifacts
-attached_assets

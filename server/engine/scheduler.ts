@@ -38,7 +38,8 @@ async function fireJob(jobId: string) {
       agentId: job.agentId,
       input: job.prompt,
       status: "pending",
-      intent: "conversational",
+      intent: (job.intent as "action" | "code_execution" | "conversational") ?? "conversational",
+      bypassApproval: job.bypassApproval ?? false,
       priority: 5,
       notifyChannelId: (job as any).notifyChannelId ?? undefined,
     });

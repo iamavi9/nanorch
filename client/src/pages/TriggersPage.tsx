@@ -12,7 +12,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Pencil, Trash2, Webhook, Copy, Check, ChevronDown, ChevronUp, CheckCircle2, XCircle, Clock } from "lucide-react";
+import { Plus, Pencil, Trash2, Webhook, Copy, Check, ChevronDown, ChevronUp, CheckCircle2, XCircle, Clock, ShieldOff } from "lucide-react";
 import type { EventTrigger, TriggerEvent, Orchestrator, Agent } from "@shared/schema";
 import PaginationControls from "@/components/PaginationControls";
 
@@ -47,6 +47,7 @@ interface TriggerFormState {
   promptTemplate: string;
   secretToken: string;
   isActive: boolean;
+  bypassApproval: boolean;
   notifyChannelId: string;
 }
 
@@ -59,6 +60,7 @@ const BLANK: TriggerFormState = {
   promptTemplate: PROMPT_TEMPLATES.github,
   secretToken: "",
   isActive: true,
+  bypassApproval: false,
   notifyChannelId: "",
 };
 
@@ -124,6 +126,7 @@ export default function TriggersPage({ workspaceId }: { workspaceId: string }) {
       promptTemplate: t.promptTemplate,
       secretToken: "",
       isActive: t.isActive ?? true,
+      bypassApproval: (t as any).bypassApproval ?? false,
       notifyChannelId: (t as any).notifyChannelId ?? "",
     });
     setOpen(true);
@@ -227,6 +230,11 @@ export default function TriggersPage({ workspaceId }: { workspaceId: string }) {
                         <Badge variant="outline" className="text-xs">
                           {SOURCE_LABELS[t.source] ?? t.source}
                         </Badge>
+                        {(t as any).bypassApproval && (
+                          <Badge variant="outline" className="text-xs text-orange-600 border-orange-400 gap-1" data-testid={`badge-bypass-trigger-${t.id}`}>
+                            <ShieldOff className="w-3 h-3" />No gates
+                          </Badge>
+                        )}
                         {((t.eventTypes as string[]) ?? []).slice(0, 3).map((ev) => (
                           <Badge key={ev} variant="secondary" className="text-xs">{ev}</Badge>
                         ))}
@@ -389,6 +397,18 @@ export default function TriggersPage({ workspaceId }: { workspaceId: string }) {
                 <div className="flex items-center gap-3">
                   <Switch id="trigger-active" checked={form.isActive} onCheckedChange={(v) => setForm({ ...form, isActive: v })} data-testid="switch-trigger-active" />
                   <Label htmlFor="trigger-active">Active</Label>
+                </div>
+
+                <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-2">
+                  <div>
+                    <p className="text-sm font-medium">Skip approval gates</p>
+                    <p className="text-xs text-muted-foreground">Tasks fired by this trigger bypass approval requests.</p>
+                  </div>
+                  <Switch
+                    data-testid="switch-trigger-bypass-approval"
+                    checked={form.bypassApproval}
+                    onCheckedChange={(v) => setForm({ ...form, bypassApproval: v })}
+                  />
                 </div>
 
                 <div className="space-y-1.5">

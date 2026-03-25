@@ -318,6 +318,15 @@ const INCREMENTAL_MIGRATIONS: Array<{ name: string; sql: string }> = [
       "created_at" timestamp DEFAULT now()
     )`,
   },
+  {
+    name: "add_scheduled_jobs_intent_bypass",
+    sql: `ALTER TABLE "scheduled_jobs" ADD COLUMN IF NOT EXISTS "intent" varchar;
+          ALTER TABLE "scheduled_jobs" ADD COLUMN IF NOT EXISTS "bypass_approval" boolean DEFAULT false`,
+  },
+  {
+    name: "add_event_triggers_bypass",
+    sql: `ALTER TABLE "event_triggers" ADD COLUMN IF NOT EXISTS "bypass_approval" boolean DEFAULT false`,
+  },
 ];
 
 const IDEMPOTENT_ERROR_CODES = new Set([
