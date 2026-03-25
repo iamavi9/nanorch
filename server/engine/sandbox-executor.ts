@@ -7,6 +7,13 @@ const SANDBOX_IMAGE = process.env.SANDBOX_IMAGE ?? "nanoorch-sandbox:latest";
 const SANDBOX_RUNTIME = process.env.SANDBOX_RUNTIME ?? "runsc";
 const DEFAULT_SANDBOX_TIMEOUT_S = 30;
 
+const ALLOWED_LANGUAGE_RE = /^[a-zA-Z0-9_-]{1,20}$/;
+
+function sanitizeLanguage(language: string): string | null {
+  const lang = language.trim().toLowerCase();
+  return ALLOWED_LANGUAGE_RE.test(lang) ? lang : null;
+}
+
 const INFRA_ERROR_PATTERNS = [
   "no such image",
   "unable to find image",
@@ -263,10 +270,19 @@ export async function runCode(
   code: string,
   timeoutSeconds: number = DEFAULT_SANDBOX_TIMEOUT_S
 ): Promise<SandboxResult> {
-  const processedCode = ensureOutput(language, code);
+  const sanitized = sanitizeLanguage(language);
+  if (!sanitized) {
+    return {
+      stdout: "",
+      stderr: `Invalid language identifier '${language}'. Use alphanumeric names only (e.g. python, javascript, bash).`,
+      exitCode: 1,
+      infraError: false,
+    };
+  }
+  const processedCode = ensureOutput(sanitized, code);
   if (isSandboxAvailable()) {
-    const result = await executeCodeInSandbox(language, processedCode, timeoutSeconds);
+    const result = await executeCodeInSandbox(sanitized, processedCode, timeoutSeconds);
     if (!result.infraError) return result;
   }
-  return executeCodeLocally(language, processedCode, timeoutSeconds);
+  return executeCodeLocally(sanitized, processedCode, timeoutSeconds);
 }

@@ -595,7 +595,7 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
                     <Input
                       value={form.heartbeatModel}
                       onChange={(e) => setForm({ ...form, heartbeatModel: e.target.value })}
-                      placeholder="e.g. gpt-4o-mini (leave blank to use orchestrator model)"
+                      placeholder="e.g. gpt-5.4-mini (leave blank to use orchestrator model)"
                       className="mt-1 text-xs"
                       data-testid="input-heartbeat-model"
                     />

@@ -31,7 +31,7 @@ import { executePipeline } from "./engine/pipeline-executor";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import { loadSecret } from "./lib/secrets";
-import { handleSlackEvent } from "./comms/slack-handler";
+import { handleSlackEvent, verifySlackSignature } from "./comms/slack-handler";
 import { handleTeamsEvent } from "./comms/teams-handler";
 import { handleGoogleChatEvent } from "./comms/google-chat-handler";
 import { createInferenceProxyRouter } from "./proxy/inference-proxy";
@@ -44,7 +44,7 @@ async function generateChatTitle(firstMessage: string): Promise<string> {
     if (openaiKey) {
       const client = new OpenAI({ apiKey: openaiKey, baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL });
       const res = await client.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: "gpt-5.4-mini",
         messages: [{ role: "user", content: prompt }],
         max_tokens: 20,
         temperature: 0.4,
@@ -58,7 +58,7 @@ async function generateChatTitle(firstMessage: string): Promise<string> {
     if (anthropicKey) {
       const client = new Anthropic({ apiKey: anthropicKey, baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL });
       const res = await client.messages.create({
-        model: "claude-haiku-4-5",
+        model: "claude-haiku-4-5-20251001",
         max_tokens: 20,
         messages: [{ role: "user", content: prompt }],
       });
@@ -376,6 +376,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (req.path === "/api/auth/login") return next();
     if (/^\/api\/channels\/[^/]+\/webhook$/.test(req.path)) return next();
     if (/^\/api\/channels\/[^/]+\/slack\/events$/.test(req.path)) return next();
+    if (/^\/api\/channels\/[^/]+\/slack\/interactions$/.test(req.path)) return next();
     if (/^\/api\/channels\/[^/]+\/teams\/events$/.test(req.path)) return next();
     if (/^\/api\/channels\/[^/]+\/google-chat\/event$/.test(req.path)) return next();
     if (/^\/api\/auth\/sso\//.test(req.path)) return next();
@@ -636,6 +637,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       req.path.startsWith("/webhooks/") ||
       /^\/channels\/[^/]+\/webhook$/.test(req.path) ||
       /^\/channels\/[^/]+\/slack\/events$/.test(req.path) ||
+      /^\/channels\/[^/]+\/slack\/interactions$/.test(req.path) ||
       /^\/channels\/[^/]+\/teams\/events$/.test(req.path) ||
       /^\/channels\/[^/]+\/google-chat\/event$/.test(req.path);
     if (isPublic) return next();
@@ -898,6 +900,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.post("/api/channels/:id/slack/interactions", webhookLimiter, async (req, res) => {
     const channelId = req.params.id as string;
+
+    const channel = await storage.getChannel(channelId);
+    if (!channel) return res.status(404).json({ error: "channel not found" });
+    const cfg = channel.config as any;
+
+    if (cfg?.signingSecret) {
+      if (!verifySlackSignature(cfg.signingSecret as string, req)) {
+        return res.status(401).json({ error: "invalid signature" });
+      }
+    }
+
     let payload: any;
     try {
       const rawPayload = typeof req.body?.payload === "string" ? req.body.payload : JSON.stringify(req.body);
@@ -908,9 +921,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.status(200).send("");
     setImmediate(async () => {
       try {
-        const channel = await storage.getChannel(channelId);
         if (!channel) return;
-        const cfg = channel.config as any;
         const action = payload?.actions?.[0];
         if (!action) return;
         const approvalId = action.value as string;
@@ -923,14 +934,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         const replyText = status === "approved"
           ? `✅ Approval granted for: ${approval.action}`
           : `❌ Approval rejected for: ${approval.action}`;
-        if (cfg?.botToken && payload?.container?.channel_id && payload?.container?.thread_ts) {
+        const replyTs = payload?.message?.thread_ts ?? payload?.container?.message_ts ?? payload?.message?.ts;
+        if (cfg?.botToken && payload?.container?.channel_id && replyTs) {
           const botToken = cfg.botToken as string;
           const chan = payload.container.channel_id as string;
-          const threadTs = payload.container.thread_ts as string;
           await fetch("https://slack.com/api/chat.postMessage", {
             method: "POST",
             headers: { Authorization: `Bearer ${botToken}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ channel: chan, thread_ts: threadTs, text: replyText }),
+            body: JSON.stringify({ channel: chan, thread_ts: replyTs, text: replyText }),
             signal: AbortSignal.timeout(10_000),
           });
         }
@@ -1163,7 +1174,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           // existingRaw stays empty; incoming values will populate all fields below
         }
         const merged = { ...existingRaw };
+        const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
         for (const [k, v] of Object.entries(incoming)) {
+          if (UNSAFE_KEYS.has(k)) continue;
           if (typeof v === "string" && v.trim()) merged[k] = v.trim();
         }
         updateData.credentialsEncrypted = encrypt(JSON.stringify(merged));
@@ -1815,9 +1828,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const { cronExpression, timezone } = parsed.data;
     if (!validateCron(cronExpression)) return res.status(400).json({ message: "Invalid cron expression" });
     const orchForClassify = await storage.getOrchestrator(parsed.data.orchestratorId);
-    const classifiedIntent = orchForClassify
+    const VALID_INTENTS = ["action", "code_execution", "conversational"];
+    const intentOverride = parsed.data.intent && VALID_INTENTS.includes(parsed.data.intent) ? parsed.data.intent : null;
+    const classifiedIntent = intentOverride ?? (orchForClassify
       ? await classifyIntent(parsed.data.prompt, orchForClassify.provider, orchForClassify.model, orchForClassify.baseUrl)
-      : "conversational";
+      : "conversational");
     const nextRunAt = computeNextRun(cronExpression, timezone ?? "UTC");
     const job = await storage.createScheduledJob({ ...parsed.data, intent: classifiedIntent, ...(nextRunAt ? { nextRunAt } : {}) });
     registerJob(job);
@@ -1840,8 +1855,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const effectiveCron = cronExpression ?? existing.cronExpression;
     const effectiveTz = timezone ?? existing.timezone ?? "UTC";
     const nextRunAt = computeNextRun(effectiveCron, effectiveTz);
+    const VALID_INTENTS_PUT = ["action", "code_execution", "conversational"];
     let intentUpdate: { intent?: string } = {};
-    if (rest.prompt) {
+    if (rest.intent && VALID_INTENTS_PUT.includes(rest.intent)) {
+      intentUpdate.intent = rest.intent;
+    } else if (rest.prompt) {
       const effectiveOrchId = rest.orchestratorId ?? existing.orchestratorId;
       const orchForReclassify = await storage.getOrchestrator(effectiveOrchId);
       if (orchForReclassify) {
@@ -2271,7 +2289,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         console.warn(
           `[auth] ADMIN_PASSWORD not set — generated a random password for '${adminUsername}'.`,
         );
-        console.warn(`[auth] One-time password: ${adminPassword}`);
+        console.warn(`[auth] One-time password: ${adminPassword.slice(0, 4)}${"*".repeat(adminPassword.length - 4)} (set ADMIN_PASSWORD env var to choose your own)`);
         console.warn("[auth] Log in and change this password immediately.");
       } else {
         console.log(`[auth] Default admin account created: ${adminUsername}`);

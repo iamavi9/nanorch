@@ -73,6 +73,7 @@ const EMPTY_FORM = {
   timezone: "UTC",
   bypassApproval: false,
   notifyChannelId: "",
+  intent: "",
 };
 
 function JobForm({
@@ -107,114 +108,141 @@ function JobForm({
   };
 
   return (
-    <div className="space-y-4">
-      <div className="space-y-2">
-        <Label>Job Name</Label>
-        <Input data-testid="input-job-name" placeholder="Daily summary" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-      </div>
+    <div className="flex flex-col">
+      {/* Scrollable body — buttons stay pinned outside */}
+      <div className="overflow-y-auto pr-1 space-y-4" style={{ maxHeight: "62vh" }}>
 
-      <div className="space-y-2">
-        <Label>Agent</Label>
-        <Select value={form.agentId} onValueChange={handleAgent}>
-          <SelectTrigger data-testid="select-agent">
-            <SelectValue placeholder="Select an agent…" />
-          </SelectTrigger>
-          <SelectContent>
-            {agents.map((a) => (
-              <SelectItem key={a.id} value={a.id}>
-                {a.name} <span className="text-muted-foreground">— {a.orchestratorName}</span>
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-
-      <div className="space-y-2">
-        <Label>Prompt</Label>
-        <Textarea
-          data-testid="input-job-prompt"
-          placeholder="Summarise all open tasks and list any blockers…"
-          className="min-h-[90px] resize-none"
-          value={form.prompt}
-          onChange={(e) => setForm({ ...form, prompt: e.target.value })}
-        />
-        <p className="text-xs text-muted-foreground">This prompt is sent to the agent on every scheduled run.</p>
-      </div>
-
-      <div className="space-y-2">
-        <Label>Schedule</Label>
-        <div className="flex flex-wrap gap-1.5">
-          {CRON_PRESETS.map((p) => (
-            <button
-              key={p.value}
-              type="button"
-              onClick={() => handlePreset(p.value)}
-              className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors ${
-                preset === p.value
-                  ? "border-primary bg-primary/10 text-primary"
-                  : "border-border bg-muted/30 text-muted-foreground hover:bg-muted/60"
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
+        <div className="space-y-2">
+          <Label>Job Name</Label>
+          <Input data-testid="input-job-name" placeholder="Daily summary" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
         </div>
-        <Input
-          data-testid="input-cron"
-          placeholder="*/30 * * * *"
-          value={form.cronExpression}
-          onChange={(e) => { setForm({ ...form, cronExpression: e.target.value }); setPreset("custom"); }}
-          className="font-mono text-sm"
-        />
-        <p className="text-xs text-muted-foreground">Standard 5-field cron syntax: minute hour day month weekday</p>
-      </div>
 
-      <div className="space-y-2">
-        <Label>Timezone</Label>
-        <Select value={form.timezone} onValueChange={(v) => setForm({ ...form, timezone: v })}>
-          <SelectTrigger data-testid="select-timezone">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {TIMEZONES.map((tz) => (
-              <SelectItem key={tz} value={tz}>{tz}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-
-      <div className="space-y-2">
-        <Label>Notify Channel (optional)</Label>
-        <Select
-          value={form.notifyChannelId || "none"}
-          onValueChange={(v) => setForm({ ...form, notifyChannelId: v === "none" ? "" : v })}
-        >
-          <SelectTrigger data-testid="select-notify-channel">
-            <SelectValue placeholder="None — use orchestrator default" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="none">None — use orchestrator default</SelectItem>
-            {channels.map((ch) => (
-              <SelectItem key={ch.id} value={ch.id}>{ch.name}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">Channel to notify when this job completes or fails.</p>
-      </div>
-
-      <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-2">
-        <div>
-          <p className="text-sm font-medium">Skip approval gates</p>
-          <p className="text-xs text-muted-foreground">Tasks created by this job bypass approval requests.</p>
+        <div className="space-y-2">
+          <Label>Agent</Label>
+          <Select value={form.agentId} onValueChange={handleAgent}>
+            <SelectTrigger data-testid="select-agent">
+              <SelectValue placeholder="Select an agent…" />
+            </SelectTrigger>
+            <SelectContent>
+              {agents.map((a) => (
+                <SelectItem key={a.id} value={a.id}>
+                  {a.name} <span className="text-muted-foreground">— {a.orchestratorName}</span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
-        <Switch
-          data-testid="switch-job-bypass-approval"
-          checked={form.bypassApproval}
-          onCheckedChange={(v) => setForm({ ...form, bypassApproval: v })}
-        />
+
+        <div className="space-y-2">
+          <Label>Prompt</Label>
+          <Textarea
+            data-testid="input-job-prompt"
+            placeholder="Summarise all open tasks and list any blockers…"
+            className="min-h-[90px] resize-none"
+            value={form.prompt}
+            onChange={(e) => setForm({ ...form, prompt: e.target.value })}
+          />
+          <p className="text-xs text-muted-foreground">This prompt is sent to the agent on every scheduled run.</p>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Schedule</Label>
+          <div className="flex flex-wrap gap-1.5">
+            {CRON_PRESETS.map((p) => (
+              <button
+                key={p.value}
+                type="button"
+                onClick={() => handlePreset(p.value)}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors ${
+                  preset === p.value
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "border-border bg-muted/30 text-muted-foreground hover:bg-muted/60"
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <Input
+            data-testid="input-cron"
+            placeholder="*/30 * * * *"
+            value={form.cronExpression}
+            onChange={(e) => { setForm({ ...form, cronExpression: e.target.value }); setPreset("custom"); }}
+            className="font-mono text-sm"
+          />
+          <p className="text-xs text-muted-foreground">Standard 5-field cron syntax: minute hour day month weekday</p>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Timezone</Label>
+          <Select value={form.timezone} onValueChange={(v) => setForm({ ...form, timezone: v })}>
+            <SelectTrigger data-testid="select-timezone">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {TIMEZONES.map((tz) => (
+                <SelectItem key={tz} value={tz}>{tz}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Notify Channel (optional)</Label>
+          <Select
+            value={form.notifyChannelId || "none"}
+            onValueChange={(v) => setForm({ ...form, notifyChannelId: v === "none" ? "" : v })}
+          >
+            <SelectTrigger data-testid="select-notify-channel">
+              <SelectValue placeholder="None — use orchestrator default" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">None — use orchestrator default</SelectItem>
+              {channels.map((ch) => (
+                <SelectItem key={ch.id} value={ch.id}>{ch.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">Channel to notify when this job completes or fails.</p>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Intent Classification</Label>
+          <Select
+            value={form.intent || "auto"}
+            onValueChange={(v) => setForm({ ...form, intent: v === "auto" ? "" : v })}
+          >
+            <SelectTrigger data-testid="select-intent">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto">Auto-detect (classify from prompt)</SelectItem>
+              <SelectItem value="conversational">Conversational — in-process executor</SelectItem>
+              <SelectItem value="action">Docker — container-isolated action</SelectItem>
+              <SelectItem value="code_execution">Sandbox — K3s / gVisor execution</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Auto-detect uses the prompt to classify the execution path. Override when the auto-classification is incorrect.
+          </p>
+        </div>
+
+        <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-2">
+          <div>
+            <p className="text-sm font-medium">Skip approval gates</p>
+            <p className="text-xs text-muted-foreground">Tasks created by this job bypass approval requests.</p>
+          </div>
+          <Switch
+            data-testid="switch-job-bypass-approval"
+            checked={form.bypassApproval}
+            onCheckedChange={(v) => setForm({ ...form, bypassApproval: v })}
+          />
+        </div>
+
       </div>
 
-      <div className="flex justify-end gap-2 pt-1">
+      {/* Pinned footer — always visible regardless of scroll position */}
+      <div className="flex justify-end gap-2 pt-3 mt-2 border-t">
         <Button variant="outline" onClick={onCancel}>Cancel</Button>
         <Button data-testid="button-save-job" onClick={() => onSave(form)} disabled={isPending}>
           {isPending && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
@@ -339,6 +367,7 @@ export default function ScheduledJobsPage({ workspaceId }: Props) {
                 timezone: editingJob.timezone ?? "UTC",
                 bypassApproval: (editingJob as any).bypassApproval ?? false,
                 notifyChannelId: (editingJob as any).notifyChannelId ?? "",
+                intent: (editingJob as any).intent ?? "",
               }}
               agents={agents}
               channels={outboundChannels}

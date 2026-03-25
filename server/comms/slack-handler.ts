@@ -21,7 +21,7 @@ const BYPASS_PHRASES = [
   "bypass approval",
 ];
 
-function verifySlackSignature(signingSecret: string, req: Request): boolean {
+export function verifySlackSignature(signingSecret: string, req: Request): boolean {
   const timestamp = req.headers["x-slack-request-timestamp"] as string;
   const slackSig = req.headers["x-slack-signature"] as string;
   if (!timestamp || !slackSig) return false;

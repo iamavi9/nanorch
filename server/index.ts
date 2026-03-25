@@ -23,7 +23,16 @@ app.use(
   }),
 );
 
-app.use(express.urlencoded({ extended: false }));
+app.use(
+  express.urlencoded({
+    extended: false,
+    verify: (req, _res, buf) => {
+      if (!(req as any).rawBody) {
+        (req as any).rawBody = buf;
+      }
+    },
+  }),
+);
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {

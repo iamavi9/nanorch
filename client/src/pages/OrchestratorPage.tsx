@@ -17,9 +17,9 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { Orchestrator } from "@shared/schema";
 
 const PROVIDERS = [
-  { id: "openai", name: "OpenAI", models: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"] },
-  { id: "anthropic", name: "Anthropic", models: ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"] },
-  { id: "gemini", name: "Google Gemini", models: ["gemini-2.5-pro", "gemini-2.5-flash"] },
+  { id: "openai", name: "OpenAI", models: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"] },
+  { id: "anthropic", name: "Anthropic", models: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"] },
+  { id: "gemini", name: "Google Gemini", models: ["gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-3.1-flash-lite-preview", "gemini-2.5-pro", "gemini-2.5-flash"] },
   { id: "ollama", name: "Ollama (on-prem)", models: ["llama3.1", "llama3.2", "qwen2.5", "mistral", "codellama", "deepseek-r1"] },
 ];
 
@@ -46,7 +46,7 @@ const defaultForm: OrchestratorForm = {
   name: "",
   description: "",
   provider: "openai",
-  model: "gpt-4o",
+  model: "gpt-5.4",
   baseUrl: "",
   systemPrompt: "",
   maxConcurrency: 3,

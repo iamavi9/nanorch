@@ -22,6 +22,9 @@ This directory holds the UI screenshots shown in the project README.
 | `observability.png` | Observability dashboard — daily usage chart, summary cards, and per-agent cost breakdown |
 | `comms.png` | Channels page — a Slack inbound channel expanded showing the Events Endpoint URL, copy button, and the Two-way Comms section |
 | `integrations.png` | Integrations page — at least Jira and GitHub cards; show the Test button and encrypted credential state |
+| `scheduled.png` | Scheduled Jobs page — list of active jobs with cron expressions, next-run times, status toggles, and the "Run Now" action |
+| `slack-approval-thread.png` | Slack approval thread — a Slack message thread showing a Block Kit approval card with Approve / Reject buttons and the agent reply after approval |
+| `nanoorch-architecture_1774022201704.png` | High-level architecture diagram — overview of the full NanoOrch system (already present in this directory) |
 
 ## Tips
 

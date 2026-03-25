@@ -50,6 +50,7 @@ export function decrypt(encryptedBase64: string): string {
   const tag = Buffer.from(payload.tag, "base64");
   const ciphertext = Buffer.from(payload.ciphertext, "base64");
   const decipher = createDecipheriv(ALGORITHM, key, iv);
+  decipher.setAuthTagLength(16);
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
 }

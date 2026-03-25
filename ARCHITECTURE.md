@@ -101,7 +101,8 @@ NanoOrch is a **self-hosted, multi-tenant AI agent orchestrator**. It lets teams
                    │  (user sessions,          │         │  OpenAI · Anthropic · Gemini  │
                    │   tasks, agents,          │         │  Ollama · AWS · GCP · Azure   │
                    │   pipelines, SSO,         │         │  Jira · GitHub · GitLab       │
-                   │   triggers, usage, ...)   │         │  RAGFlow · Slack · Teams · Google Chat │
+                   │   triggers, usage, ...)   │         │  ServiceNow · RAGFlow         │
+                   │                           │         │  Slack · Teams · Google Chat  │
                    └───────────────────────────┘         └──────────────────────────────┘
                                            │
                    ┌───────────────────────▼──────────────────────────────────────────┐
@@ -111,6 +112,8 @@ NanoOrch is a **self-hosted, multi-tenant AI agent orchestrator**. It lets teams
                    │   Runtime: runc (default) or gVisor runsc (hardened)             │
                    └──────────────────────────────────────────────────────────────────┘
 ```
+
+> **Visual reference:** `docs/screenshots/nanoorch-architecture_1774022201704.png` contains a graphical overview of the full system architecture.
 
 ---
 
@@ -1060,6 +1063,19 @@ Pipelines support a `cronExpression` and `timezone` field. The cron scheduler ca
 | Scheduled Job | `scheduled_jobs.cron_expression` | Creates a task for the configured agent |
 | Pipeline | `pipelines.cron_expression` | Calls `executePipeline()` |
 
+### Configuration Fields
+
+| Field | Description |
+|---|---|
+| `name` | Human-readable label |
+| `cronExpression` | Standard 5-part cron expression (e.g. `0 9 * * 1`) |
+| `timezone` | IANA timezone string (e.g. `America/New_York`, `UTC`) |
+| `orchestratorId` | Target orchestrator that runs the task |
+| `prompt` | Task content sent to the agent |
+| `intent` | Execution-path override: `auto-detect` (LLM classifier, default), `conversational` (LocalExecutor), `action` (DockerExecutor), `code_execution` (sandbox). When `auto-detect` or omitted the inline `classifyIntent()` function is called. |
+| `bypassApproval` | When `true`, tasks created by this job skip approval gates regardless of agent configuration |
+| `notifyChannelId` | Optional outbound channel for posting job results |
+
 ### Lifecycle
 
 ```
@@ -1071,7 +1087,9 @@ startScheduler()
 
 registerJob(job):
   cron.schedule(job.cronExpression, () => {
-    Create Task with job.prompt → queue picks it up
+    resolvedIntent = job.intent (if explicit) OR classifyIntent(job.prompt)
+    Create Task with job.prompt, resolvedIntent, job.bypassApproval
+      → queue picks it up
     Update job.lastRunAt and job.nextRunAt
     dispatchNotification('job.fired')
   }, { timezone: job.timezone })

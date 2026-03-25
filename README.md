@@ -246,171 +246,288 @@ REDIS_URL=redis://localhost:6379    # Enable Redis sessions (required for multi-
 
 ---
 
-## Local Setup with Docker Desktop
+## Local Setup
 
-The fastest way to run NanoOrch on your laptop or workstation. Docker Desktop bundles everything you need — no separate Postgres install, no gVisor, no Nginx required.
+NanoOrch runs on any machine that can run Docker. Pick the engine that matches your OS below, then follow the common steps to get the stack up.
 
-### Prerequisites
-
-| Tool | Where to get it |
-|------|----------------|
-| **Docker Desktop** | [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/) — macOS, Windows (WSL2), or Linux |
-| **Git** | [git-scm.com](https://git-scm.com/) |
-| **An AI provider key** | OpenAI, Anthropic, or Gemini — or a locally running [Ollama](https://ollama.com/) instance |
-
-> **Windows users:** Enable the WSL2 backend in Docker Desktop → Settings → General → "Use the WSL 2 based engine".
+| OS | Recommended engine |
+|----|-------------------|
+| **macOS** | Docker Desktop **or** Colima (lightweight, no licence fee) |
+| **Windows** | Docker Desktop with WSL2 backend |
+| **WSL2 headless** | Docker Engine + Compose plugin — no Docker Desktop required |
 
 ---
 
-### Step 1 — Clone the repository
+### macOS
+
+#### Option A — Docker Desktop (easiest)
+
+1. Download **Docker Desktop for Mac** (Apple Silicon or Intel) from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/).
+2. Open the `.dmg`, drag Docker to Applications, and launch it.
+3. Wait for the whale icon in the menu bar to show **"Docker Desktop is running"**.
+4. Verify in Terminal:
+   ```bash
+   docker --version        # Docker version 26+
+   docker compose version  # Docker Compose version v2+
+   ```
+
+#### Option B — Colima (lightweight, no GUI, free)
+
+[Colima](https://github.com/abiosoft/colima) is an open-source container runtime for macOS that uses the macOS virtualisation framework. No GUI, no licence.
+
+```bash
+# Install Homebrew if you don't have it
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Install Colima and the Docker CLI tools
+brew install colima docker docker-compose
+
+# Start Colima (2 CPU, 4 GB RAM, 20 GB disk — adjust to taste)
+colima start --cpu 2 --memory 4 --disk 20
+
+# Verify
+docker --version
+docker compose version
+```
+
+> **Stopping Colima:** `colima stop` — containers and volumes are preserved. Run `colima start` to resume.
+>
+> **Ollama on macOS host:** Add `OLLAMA_BASE_URL=http://host.lima.internal:11434` to `.env` when using Colima (Colima exposes the host at `host.lima.internal` instead of `host.docker.internal`).
+
+---
+
+### Windows — Docker Desktop with WSL2
+
+#### Step A — Enable WSL2
+
+Open **PowerShell as Administrator** and run:
+
+```powershell
+wsl --install
+```
+
+This installs WSL2 and an Ubuntu distribution. Reboot when prompted.
+
+> If you already have WSL1, upgrade it:
+> ```powershell
+> wsl --set-default-version 2
+> ```
+
+#### Step B — Install Docker Desktop for Windows
+
+1. Download from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/).
+2. Run the installer (enable the WSL2 backend option when asked).
+3. Launch Docker Desktop. In **Settings → General**, confirm **"Use the WSL 2 based engine"** is checked.
+4. In **Settings → Resources → WSL Integration**, enable integration for your Ubuntu distro.
+
+#### Step C — Verify inside WSL2
+
+Open your Ubuntu terminal (search "Ubuntu" in the Start menu) and run:
+
+```bash
+docker --version        # Docker version 26+
+docker compose version  # Docker Compose version v2+
+```
+
+> **All subsequent commands in the Windows path should be run from your WSL2 Ubuntu terminal**, not PowerShell — paths and line endings work correctly there.
+
+---
+
+### WSL2 — Docker Engine without Docker Desktop
+
+Use this if you want a fully headless setup inside WSL2 with no Docker Desktop installation (suitable for devcontainers, CI-like environments, or if you want to avoid the Docker Desktop licence).
+
+Open your **WSL2 Ubuntu terminal** and run:
+
+```bash
+# 1 — Remove any old Docker packages
+sudo apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null; true
+
+# 2 — Install prerequisites
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg lsb-release
+
+# 3 — Add Docker's official GPG key and repo
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+  https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# 4 — Install Docker Engine + Compose plugin
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
+  docker-buildx-plugin docker-compose-plugin
+
+# 5 — Start the Docker daemon (WSL2 doesn't use systemd by default)
+sudo service docker start
+
+# 6 — Allow your user to run Docker without sudo
+sudo usermod -aG docker $USER
+newgrp docker
+
+# 7 — Verify
+docker --version
+docker compose version
+```
+
+> **Auto-start on WSL2 launch:** Add `sudo service docker start` to your `~/.bashrc` or `~/.zshrc`, or enable `systemd` in `/etc/wsl.conf`:
+> ```ini
+> [boot]
+> systemd=true
+> ```
+> Then restart WSL2: `wsl --shutdown` from PowerShell, and reopen the terminal.
+
+> **Reaching the Windows host from a container:** Docker Engine on WSL2 does not add `host.docker.internal` automatically. Add the following to the `app` service in `docker-compose.yml`:
+> ```yaml
+> extra_hosts:
+>   - "host.docker.internal:host-gateway"
+> ```
+
+---
+
+### Common steps — after your engine is running
+
+Once Docker (any option above) reports `Docker version 26+`, the remaining steps are identical on all platforms.
+
+#### 1 — Clone the repository
 
 ```bash
 git clone https://github.com/your-org/nanoorch.git
 cd nanoorch
 ```
 
----
-
-### Step 2 — Create your `.env` file
+#### 2 — Create your `.env` file
 
 ```bash
 cp .env.example .env
 ```
 
-Open `.env` in any editor and set the following values at minimum:
+Open `.env` in any editor and set these values at minimum:
 
 ```env
-# ── Database ─────────────────────────────────────────────────────────────
-POSTGRES_PASSWORD=devpassword          # any password — used by the local Postgres container
+# ── Database ──────────────────────────────────────────────────────────────
+POSTGRES_PASSWORD=devpassword        # any password — used by the local Postgres container
 
-# ── Security ─────────────────────────────────────────────────────────────
+# ── Security ──────────────────────────────────────────────────────────────
 SESSION_SECRET=replace-with-32-or-more-random-characters
-ENCRYPTION_KEY=                        # generate below
+ENCRYPTION_KEY=                      # generate with the command below
 
-# ── Admin account ────────────────────────────────────────────────────────
+# ── Admin account ─────────────────────────────────────────────────────────
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD=admin                   # change to something stronger
+ADMIN_PASSWORD=admin                 # change to something stronger
 
-# ── At least ONE AI provider key ─────────────────────────────────────────
+# ── At least ONE AI provider key ──────────────────────────────────────────
 AI_INTEGRATIONS_OPENAI_API_KEY=sk-...
 # AI_INTEGRATIONS_ANTHROPIC_API_KEY=sk-ant-...
 # AI_INTEGRATIONS_GEMINI_API_KEY=AIza...
 
-# ── Docker sandbox (Docker Desktop uses runc, not gVisor) ─────────────────
+# ── Docker sandbox runtime (gVisor not required locally) ──────────────────
 SANDBOX_RUNTIME=runc
 ```
 
-Generate a random encryption key and append it in one command:
+Generate the encryption key in one command:
 
 ```bash
 # macOS / Linux / WSL2
 echo "ENCRYPTION_KEY=$(openssl rand -hex 32)" >> .env
 
-# Windows PowerShell (alternative)
-Add-Content .env "ENCRYPTION_KEY=$(-join ((48..57 + 65..70 + 97..102) | Get-Random -Count 64 | ForEach-Object {[char]$_}))"
+# Windows PowerShell (if not using WSL2)
+Add-Content .env "ENCRYPTION_KEY=$(-join ((48..57+65..70+97..102) | Get-Random -Count 64 | ForEach-Object {[char]$_}))"
 ```
 
-> **Ollama on the host machine?** Add this line so the container can reach it:
-> ```env
-> OLLAMA_BASE_URL=http://host.docker.internal:11434
-> ```
-> `host.docker.internal` resolves to your Mac/Windows host automatically inside Docker Desktop containers.
+**Ollama running on the host?** Add the correct variable for your engine:
 
----
+| Engine | Variable to add to `.env` |
+|--------|--------------------------|
+| Docker Desktop (macOS / Windows) | `OLLAMA_BASE_URL=http://host.docker.internal:11434` |
+| Colima (macOS) | `OLLAMA_BASE_URL=http://host.lima.internal:11434` |
+| Docker Engine on WSL2 | `OLLAMA_BASE_URL=http://host.docker.internal:11434` (after adding `extra_hosts` above) |
 
-### Step 3 — (Optional) Build the agent images
+#### 3 — (Optional) Build the agent images
 
-Only needed if you want Docker-isolated action tasks or the code execution sandbox locally.
+Only required if you want Docker-isolated action tasks or the Python/JavaScript code execution sandbox.
 
 ```bash
-# Agent container — for isolated action tasks
+# Action task agent
 docker build -t nanoorch-agent:latest ./agent
 
-# Sandbox container — for Python / JavaScript code execution
+# Code execution sandbox
 docker build -t nanoorch-sandbox:latest ./agent/sandbox
 ```
 
-> You can skip this step entirely for a basic local run. Agent tasks will fall back to in-process execution; code execution will be disabled until the sandbox image is built.
+> Skip this step for a basic local run. Tasks fall back to in-process execution and code execution is disabled until the sandbox image is built.
 
----
-
-### Step 4 — Start the stack
+#### 4 — Start the stack
 
 ```bash
 docker compose up -d
 ```
 
-This pulls and starts three containers:
+Three containers start:
 
 | Container | Role |
 |-----------|------|
 | `app` | NanoOrch Express + Vite server on port **3000** |
-| `db` | PostgreSQL 15 with a persistent named volume |
-| `redis` | Optional session / rate-limit store (used if `REDIS_URL` is set) |
+| `db` | PostgreSQL 15 with a named persistent volume |
+| `redis` | Session / rate-limit store (active when `REDIS_URL` is set) |
 
-Database migrations run automatically on first boot. Watch the logs to confirm:
+Database migrations run automatically on first boot. Tail the logs to confirm:
 
 ```bash
 docker compose logs -f app
 ```
 
-Wait until you see:
+Look for:
 
 ```
 [db] Database migrations applied
 [express] serving on port 3000
 ```
 
-Press `Ctrl+C` to stop following logs — the containers keep running in the background.
+Press `Ctrl+C` to stop tailing — the stack keeps running in the background.
 
----
+#### 5 — Open the app
 
-### Step 5 — Open the app
+Visit **[http://localhost:3000](http://localhost:3000)** in your browser and log in with the credentials you set in `.env`.
 
-Visit **[http://localhost:3000](http://localhost:3000)** in your browser.
-
-Log in with the credentials you set in `.env`:
-
-| Field | Value |
-|-------|-------|
-| Username | value of `ADMIN_USERNAME` (default: `admin`) |
+| Field | Default |
+|-------|---------|
+| Username | `admin` (or `ADMIN_USERNAME`) |
 | Password | value of `ADMIN_PASSWORD` |
 
----
-
-### Step 6 — Create a workspace and start orchestrating
+#### 6 — Create a workspace and start orchestrating
 
 1. Click **New Workspace** and give it a name.
-2. Inside the workspace, click **New Orchestrator** — select your AI provider and paste the model name (e.g. `gpt-4o`).
+2. Inside the workspace, click **New Orchestrator** — select your AI provider and model (e.g. `gpt-4o`).
 3. Add an **Agent** with a system prompt.
 4. Open the **Chat** tab and send your first message.
 
 ---
 
-### Stopping and starting
+### Stopping, starting, and updating
 
 ```bash
-# Stop all containers (data is preserved)
+# Stop all containers — data is preserved
 docker compose down
 
 # Start again
 docker compose up -d
 
-# Stop and wipe all data (Postgres volume deleted — use with caution)
+# Wipe all data including the Postgres volume — use with caution
 docker compose down -v
-```
 
----
-
-### Updating to the latest version
-
-```bash
+# Pull latest code and rebuild
 git pull
 docker compose build app
 docker compose up -d
 ```
 
-Migrations run automatically on restart — no manual database steps needed.
+Migrations run automatically on every restart — no manual database steps needed.
 
 ---
 
@@ -418,12 +535,14 @@ Migrations run automatically on restart — no manual database steps needed.
 
 | Symptom | Fix |
 |---------|-----|
-| Port 3000 already in use | Stop the other process, or change `ports` in `docker-compose.yml` (e.g. `"3001:3000"`) |
-| `ENCRYPTION_KEY not set` error | Make sure `.env` has the `ENCRYPTION_KEY` line and re-run `docker compose up -d` |
-| Login fails | Check `ADMIN_USERNAME` / `ADMIN_PASSWORD` in `.env`; run `docker compose down -v` to wipe state and recreate the admin |
-| AI call fails | Verify the API key in `.env` is correct and that Docker Desktop has internet access (Settings → Resources → Network) |
-| Ollama not reachable | Confirm Ollama is running locally (`ollama serve`), and `OLLAMA_BASE_URL=http://host.docker.internal:11434` is in `.env` |
-| Cannot reach `host.docker.internal` on Linux | Docker Desktop for Linux supports it natively; if using plain Docker Engine, add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `app` service in `docker-compose.yml` |
+| Port 3000 already in use | Stop the conflicting process, or map a different host port in `docker-compose.yml` (e.g. `"3001:3000"`) |
+| `ENCRYPTION_KEY not set` error | Add the `ENCRYPTION_KEY` line to `.env` and re-run `docker compose up -d` |
+| Login fails with correct credentials | Run `docker compose down -v` to wipe state and recreate the admin from `.env` values |
+| AI call returns auth error | Double-check the API key in `.env`; confirm Docker Desktop / Colima has internet access |
+| Ollama not reachable | Verify Ollama is running (`ollama serve`); use the correct `OLLAMA_BASE_URL` for your engine (see table above) |
+| `host.docker.internal` not resolving on WSL2 Docker Engine | Add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `app` service in `docker-compose.yml` |
+| Colima VM out of memory | Run `colima stop` then `colima start --cpu 2 --memory 6 --disk 30` to increase resources |
+| Docker Desktop on Windows is slow | Move the repo into the WSL2 filesystem (`/home/<user>/`) instead of the Windows filesystem (`/mnt/c/`) — filesystem performance inside WSL2 is significantly faster |
 
 ---
 
@@ -1198,6 +1317,12 @@ Task created → agent runs → output produced
           ↓
 Reply posted back to Slack thread / Teams conversation
 ```
+
+The screenshot below shows a real Slack thread: a user mentions `@nanoorch` with a high-impact request, the agent replies in the same thread and raises an **Approval Required** card with a full impact summary and interactive **Approve / Reject** buttons — all without leaving Slack.
+
+![Slack approval thread](./docs/screenshots/slack-approval-thread.png)
+
+*NanoOrch approval gate in Slack — the agent pauses, posts a structured approval card with action description and impact analysis, and waits for a human decision before proceeding.*
 
 ### Setup — Slack inbound
 

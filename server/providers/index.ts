@@ -47,18 +47,21 @@ export interface ProviderModelInfo {
 
 export const PROVIDER_MODELS: Record<Provider, ProviderModelInfo[]> = {
   openai: [
-    { id: "gpt-4o", name: "GPT-4o", description: "Most capable multimodal model" },
-    { id: "gpt-4o-mini", name: "GPT-4o Mini", description: "Fast and affordable" },
-    { id: "gpt-4-turbo", name: "GPT-4 Turbo", description: "Previous generation GPT-4" },
+    { id: "gpt-5.4", name: "GPT-5.4", description: "Flagship model for complex reasoning and agentic workflows" },
+    { id: "gpt-5.4-mini", name: "GPT-5.4 Mini", description: "Strongest mini model for coding and subagents" },
+    { id: "gpt-5.4-nano", name: "GPT-5.4 Nano", description: "Lowest latency and cost variant" },
   ],
   anthropic: [
-    { id: "claude-opus-4-5", name: "Claude Opus 4.5", description: "Most capable Claude model" },
-    { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", description: "Balanced performance" },
-    { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", description: "Fast and lightweight" },
+    { id: "claude-opus-4-6", name: "Claude Opus 4.6", description: "Most capable Claude model" },
+    { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", description: "Balanced performance" },
+    { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", description: "Fast and lightweight" },
   ],
   gemini: [
-    { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", description: "Most capable Gemini model" },
-    { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", description: "Fast and efficient" },
+    { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro (Preview)", description: "Advanced intelligence, complex problem-solving and agentic capabilities" },
+    { id: "gemini-3-flash-preview", name: "Gemini 3 Flash (Preview)", description: "Frontier-class performance at a fraction of the cost" },
+    { id: "gemini-3.1-flash-lite-preview", name: "Gemini 3.1 Flash-Lite (Preview)", description: "Lightweight frontier-class performance, lowest cost" },
+    { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", description: "Most capable stable Gemini model" },
+    { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", description: "Fast and efficient stable model" },
   ],
   ollama: [
     { id: "llama3.1", name: "Llama 3.1", description: "Meta's Llama 3.1 (tool calling supported)" },
