@@ -1158,3 +1158,40 @@ Multiple agents in the same workspace can each target a different Jira project. 
 | `POST/GET/DELETE` | `/mcp` | MCP HTTP/SSE endpoint — authenticate with `Authorization: Bearer nano_mcp_...` |
 
 ---
+
+## License
+
+NanoOrch is released under the **Apache License 2.0**.
+
+```
+Copyright 2026 NanoOrch Contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+The full license text is available in the [`LICENSE`](./LICENSE) file.
+
+### What the Apache 2.0 license means in practice
+
+| You can | You must |
+|---------|---------|
+| Use NanoOrch commercially | Retain the copyright and license notice in any distribution |
+| Modify the source code | State clearly if you modified the files |
+| Distribute the software (original or modified) | Include a copy of the Apache 2.0 license |
+| Use it privately without distributing | — |
+| Sub-license under a different license | — |
+| Use contributor patents (patent grant included) | — |
+
+### Contributing
+
+Contributions are welcome. By submitting a pull request you agree that your contribution will be licensed under the Apache 2.0 license and that you have the right to grant that license.
