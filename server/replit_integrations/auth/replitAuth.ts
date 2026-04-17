@@ -120,10 +120,19 @@ export async function setupAuth(app: Express) {
 
   app.get("/api/logout", (req, res) => {
     req.logout(() => {
+      // Use APP_URL env var (or Replit domain) as the authoritative post-logout
+      // redirect origin — never derived from request headers to prevent spoofing.
+      const replitDomain = process.env.REPLIT_DOMAINS?.split(",")[0]?.trim();
+      const origin = process.env.APP_URL?.replace(/\/$/, "") ||
+        (replitDomain ? `https://${replitDomain}` : null);
+      if (!origin) {
+        // No trusted base URL configured; fall back to home page redirect.
+        return res.redirect("/");
+      }
       res.redirect(
         client.buildEndSessionUrl(config, {
           client_id: process.env.REPL_ID!,
-          post_logout_redirect_uri: `${req.protocol}://${req.hostname}`,
+          post_logout_redirect_uri: origin,
         }).href
       );
     });

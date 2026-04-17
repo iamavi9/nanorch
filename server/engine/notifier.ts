@@ -1,5 +1,6 @@
 import { storage } from "../storage";
 import type { Channel } from "@shared/schema";
+import { assertSafeUrl } from "../lib/ssrf-guard";
 
 export type NotificationEvent = "task.completed" | "task.failed" | "task.approval_requested" | "job.fired" | "heartbeat.fired" | "heartbeat.alert";
 
@@ -75,6 +76,7 @@ function buildBody(ch: Channel, event: NotificationEvent, payload: NotificationP
 async function fireChannel(ch: Channel, event: NotificationEvent, payload: NotificationPayload): Promise<void> {
   const cfg = ch.config as { url?: string; events?: string[]; secret?: string } | null;
   if (!cfg?.url) return;
+  try { assertSafeUrl(cfg.url); } catch { return; }
   if (Array.isArray(cfg.events) && cfg.events.length > 0 && !cfg.events.includes(event)) return;
 
   const body = JSON.stringify(buildBody(ch, event, payload));
@@ -113,6 +115,7 @@ export async function dispatchToChannel(channelId: string, label: string, text: 
     if (!ch) return;
     const cfg = ch.config as { url?: string } | null;
     if (!cfg?.url) return;
+    try { assertSafeUrl(cfg.url); } catch { return; }
 
     let body: string;
     if (ch.type === "slack") {

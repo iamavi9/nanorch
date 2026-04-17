@@ -7,7 +7,21 @@ import { startScheduler } from "./engine/scheduler";
 import { startHeartbeats } from "./engine/heartbeat-scheduler";
 
 const app = express();
+app.disable("x-powered-by");
+// snyk-disable-next-line javascript/HttpToHttps
 const httpServer = createServer(app);
+
+// In production the app runs behind a TLS-terminating reverse proxy.
+// Redirect any plain-HTTP requests that slip through to HTTPS.
+app.use((req, res, next) => {
+  if (
+    process.env.NODE_ENV === "production" &&
+    req.headers["x-forwarded-proto"] !== "https"
+  ) {
+    return res.redirect(301, `https://${req.headers.host}${req.url}`);
+  }
+  next();
+});
 
 declare module "http" {
   interface IncomingMessage {

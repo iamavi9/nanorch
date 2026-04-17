@@ -42,8 +42,9 @@ export function verifySlackSignature(signingSecret: string, req: Request): boole
   }
 }
 
-function stripMentions(text: string): string {
-  return text.replace(/<@[A-Z0-9]+>/g, "").trim();
+function stripMentions(text: unknown): string {
+  const s = typeof text === "string" ? text : String(text ?? "");
+  return s.replace(/<@[A-Z0-9]+>/g, "").trim();
 }
 
 function parseAgentName(text: string): { agentName: string | null; prompt: string } {

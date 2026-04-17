@@ -175,6 +175,9 @@ async function isBinaryFile(filePath: string): Promise<boolean> {
 
 async function tryReadFile(dir: string, relPath: string): Promise<string | null> {
   const abs = join(dir, relPath);
+  // Guard against path traversal: resolved path must remain inside `dir`
+  const resolvedDir = join(dir);
+  if (!abs.startsWith(resolvedDir + "/") && abs !== resolvedDir) return null;
   if (!existsSync(abs)) return null;
   try {
     const s = await stat(abs);

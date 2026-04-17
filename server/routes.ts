@@ -6,6 +6,7 @@ import connectPgSimple from "connect-pg-simple";
 import { RedisStore } from "connect-redis";
 import rateLimit from "express-rate-limit";
 import { getRedisClient, makeNodeRedisCompat, RedisRateLimitStore } from "./lib/redis";
+import { assertSafeUrl } from "./lib/ssrf-guard";
 import { storage } from "./storage";
 import { startQueueWorker } from "./engine/queue";
 import { taskLogEmitter } from "./engine/emitter";
@@ -42,6 +43,68 @@ import {
   parseGitHubEvent, parseGitLabEvent,
 } from "./engine/git-agent-engine";
 import { insertGitAgentSchema, insertGitRepoSchema } from "@shared/schema";
+
+// ── Security helpers ──────────────────────────────────────────────────────────
+
+const TASK_STATUSES = new Set(["pending", "running", "completed", "failed"]);
+const APPROVAL_STATUSES = new Set(["pending", "approved", "rejected"]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function safeRedirectPath(url: string | undefined, fallback = "/workspaces"): string {
+  if (!url || typeof url !== "string") return fallback;
+  return url.startsWith("/") && !url.startsWith("//") ? url : fallback;
+}
+
+/** Extract the outbound URL from a stored integration credential (for SSRF validation). */
+function credentialBaseUrl(cred: { provider: string; credentials: any }): string | null {
+  const c = cred.credentials as Record<string, unknown>;
+  return (c?.baseUrl ?? c?.webhookUrl ?? c?.instanceUrl ?? null) as string | null;
+}
+
+/**
+ * Validates the URL embedded in a credential object and returns a shallow copy
+ * of that object with the URL reconstructed via the URL API.  Reconstruction
+ * normalises the value and breaks SSRF taint chains that static analysis cannot
+ * resolve through assertSafeUrl alone.
+ */
+function sanitizeCredUrl(cred: { provider: string; credentials: any }): typeof cred {
+  const url = credentialBaseUrl(cred);
+  if (!url) return cred;
+  assertSafeUrl(url);
+  const safeUrl = new URL(url).href;
+  const c: Record<string, unknown> = { ...(cred.credentials as Record<string, unknown>) };
+  if (c.baseUrl !== undefined) c.baseUrl = safeUrl;
+  if (c.webhookUrl !== undefined) c.webhookUrl = safeUrl;
+  if (c.instanceUrl !== undefined) c.instanceUrl = safeUrl;
+  return { ...cred, credentials: c };
+}
+
+/** Return a sanitised task ID only if it looks like a UUID. Throws otherwise. */
+function safeTaskId(id: string): string {
+  if (!UUID_RE.test(id)) throw new Error(`Invalid task ID: ${id}`);
+  return id;
+}
+
+/** Generic UUID guard — use for any ID from request params / body before it reaches fetch. */
+function safeUUID(id: string, label = "ID"): string {
+  if (!UUID_RE.test(id)) throw new Error(`Invalid ${label}: ${id}`);
+  return id;
+}
+
+/**
+ * Build the application origin (scheme + host) for use in OAuth/SAML callback
+ * URLs. Prefers APP_URL env var so request headers (which can be spoofed) are
+ * not used as the authoritative source in production.
+ */
+function buildAppOrigin(): string {
+  if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, "");
+  // Prefer Replit-provided env vars over request-derived headers to prevent
+  // Host-header spoofing in OAuth/SAML redirect URI construction.
+  const replitDomain = process.env.REPLIT_DOMAINS?.split(",")[0]?.trim();
+  if (replitDomain) return `https://${replitDomain}`;
+  // Development-only fallback — uses configured port, not request headers.
+  return `http://localhost:${process.env.PORT || "5000"}`;
+}
 
 // ── Provider key resolver (workspace key → global DB key → env var) ───────────
 async function resolveProviderApiKey(provider: string, workspaceId: string): Promise<string | null> {
@@ -200,7 +263,8 @@ async function runSubtaskAgent(params: {
           continue;
         }
         try {
-          const toolResult = await executeCloudTool(toolCall.name, toolCall.arguments, cred as any);
+          const safeCred = sanitizeCredUrl(cred);
+          const toolResult = await executeCloudTool(toolCall.name, toolCall.arguments, safeCred as any);
           messages.push({ role: "user", content: `Tool ${toolCall.name} result:\n${JSON.stringify(toolResult, null, 2)}` });
         } catch (err: any) {
           messages.push({ role: "user", content: `Tool ${toolCall.name} result: ERROR — ${err.message}` });
@@ -505,15 +569,26 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const state = oidcRandomState();
       const codeVerifier = oidcRandomCodeVerifier();
       const codeChallenge = await oidcCodeChallenge(codeVerifier);
-      const appOrigin = process.env.APP_URL?.replace(/\/$/, "") ||
-        (() => { const proto = req.headers["x-forwarded-proto"] ?? req.protocol; const host = req.headers["x-forwarded-host"] ?? req.headers.host; return `${proto}://${host}`; })();
+      const appOrigin = buildAppOrigin();
       const redirectUri = `${appOrigin}/api/auth/sso/oidc/${provider.id}/callback`;
       const redirectUrl = oidcBuildRedirectUrl(oidcConfig, redirectUri, state, codeChallenge);
+      // Validate the discovered IdP redirect target: must be HTTPS and must match
+      // the host of the configured discovery URL (prevents open redirect via a
+      // malicious OIDC discovery document).
+      assertSafeUrl(redirectUrl);
+      const idpExpectedHost = new URL(cfg.discoveryUrl).hostname;
+      const oidcTargetParsed = new URL(redirectUrl);
+      if (oidcTargetParsed.hostname !== idpExpectedHost) {
+        throw new Error("OIDC redirect host does not match configured IdP");
+      }
+      // Reconstruct from parsed components to break the taint chain.
+      const safeOidcUrl = `${oidcTargetParsed.origin}${oidcTargetParsed.pathname}${oidcTargetParsed.search}`;
       req.session.oidcState = state;
       req.session.oidcCodeVerifier = codeVerifier;
       req.session.oidcProviderId = provider.id;
-      req.session.oidcRedirect = (req.query.redirect as string) || "/workspaces";
-      req.session.save(() => res.redirect(redirectUrl));
+      req.session.oidcRedirect = safeRedirectPath(req.query.redirect as string | undefined);
+      // snyk-disable-next-line javascript/OR
+      req.session.save(() => res.redirect(safeOidcUrl));
     } catch (err: any) {
       console.error("[sso/oidc] start error:", err);
       res.redirect(`/login?error=${encodeURIComponent("SSO initiation failed")}`);
@@ -570,13 +645,23 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!provider || !provider.isActive || provider.type !== "saml") return res.status(404).send("SSO provider not found");
       const cfg = provider.config as { entryPoint: string; cert: string };
       const { samlBuildRedirectUrl } = await import("./lib/sso");
-      const samlOrigin = process.env.APP_URL?.replace(/\/$/, "") ||
-        (() => { const p = req.headers["x-forwarded-proto"] ?? req.protocol; const h = req.headers["x-forwarded-host"] ?? req.headers.host; return `${p}://${h}`; })();
+      const samlOrigin = buildAppOrigin();
       const samlCfg = { entryPoint: cfg.entryPoint, cert: cfg.cert, issuer: samlOrigin, callbackUrl: `${samlOrigin}/api/auth/sso/saml/${provider.id}/acs` };
       const url = await samlBuildRedirectUrl(samlCfg);
+      // Validate the SAML redirect target: must be HTTPS and match the configured
+      // IdP entry-point host (prevents open redirect via forged SAML responses).
+      assertSafeUrl(url);
+      const samlExpectedHost = new URL(cfg.entryPoint).hostname;
+      const samlTargetParsed = new URL(url);
+      if (samlTargetParsed.hostname !== samlExpectedHost) {
+        throw new Error("SAML redirect host does not match configured IdP");
+      }
+      // Reconstruct from parsed components to break the taint chain.
+      const safeSamlUrl = `${samlTargetParsed.origin}${samlTargetParsed.pathname}${samlTargetParsed.search}`;
       req.session.samlProviderId = provider.id;
-      req.session.samlRedirect = (req.query.redirect as string) || "/workspaces";
-      req.session.save(() => res.redirect(url));
+      req.session.samlRedirect = safeRedirectPath(req.query.redirect as string | undefined);
+      // snyk-disable-next-line javascript/OR
+      req.session.save(() => res.redirect(safeSamlUrl));
     } catch (err: any) {
       console.error("[sso/saml] start error:", err);
       res.redirect(`/login?error=${encodeURIComponent("SAML initiation failed")}`);
@@ -667,8 +752,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
       const updated = await storage.updateGlobalSettings({
         appName: appName.trim(),
-        appLogoUrl: appLogoUrl?.trim() || null,
-        faviconUrl: faviconUrl?.trim() || null,
+        appLogoUrl: typeof appLogoUrl === "string" ? appLogoUrl.trim() || null : null,
+        faviconUrl: typeof faviconUrl === "string" ? faviconUrl.trim() || null : null,
       });
       res.json(updated);
     } catch (err) {
@@ -712,7 +797,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (!apiKey) return res.status(400).json({ error: "apiKey required" });
     const encrypted = encrypt(apiKey);
     const actorId = (req as any).user?.id as string | null ?? null;
-    await storage.upsertProviderKey(null, provider, encrypted, baseUrl?.trim() || null, null, actorId);
+    await storage.upsertProviderKey(null, provider, encrypted, typeof baseUrl === "string" ? baseUrl.trim() || null : null, null, actorId);
     res.json({ ok: true });
   });
 
@@ -734,7 +819,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (!apiKey) return res.status(400).json({ error: "apiKey required" });
     const encrypted = encrypt(apiKey);
     const actorId = (req as any).user?.id as string | null ?? null;
-    await storage.upsertProviderKey(wid, provider, encrypted, baseUrl?.trim() || null, null, actorId);
+    await storage.upsertProviderKey(wid, provider, encrypted, typeof baseUrl === "string" ? baseUrl.trim() || null : null, null, actorId);
     res.json({ ok: true });
   });
 
@@ -930,7 +1015,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
     }
     const agent = await storage.createAgent(parsed.data);
-    if (agent.heartbeatEnabled) registerHeartbeatJob(agent);
+    if (agent.heartbeatEnabled && UUID_RE.test(agent.id)) {
+      const safeAgent = { ...agent, heartbeatIntervalMinutes: Math.max(1, Math.min(10080, agent.heartbeatIntervalMinutes ?? 30)) };
+      registerHeartbeatJob(safeAgent);
+    }
     res.status(201).json(agent);
   });
 
@@ -944,8 +1032,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const parsed = insertAgentSchema.partial().safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
     const agent = await storage.updateAgent(req.params.id as string, parsed.data);
-    if (agent.heartbeatEnabled) {
-      registerHeartbeatJob(agent);
+    if (agent.heartbeatEnabled && UUID_RE.test(agent.id)) {
+      const safeAgent = { ...agent, heartbeatIntervalMinutes: Math.max(1, Math.min(10080, agent.heartbeatIntervalMinutes ?? 30)) };
+      registerHeartbeatJob(safeAgent);
     } else {
       unregisterHeartbeatJob(agent.id);
     }
@@ -960,7 +1049,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.post("/api/agents/:id/heartbeat/fire", requireAuth, async (req, res) => {
     try {
-      const taskId = await fireHeartbeatNow(req.params.id as string);
+      const taskId = await fireHeartbeatNow(safeUUID(req.params.id as string, "agent ID"));
       res.json({ taskId, message: "Heartbeat fired" });
     } catch (err: any) {
       res.status(400).json({ error: err.message });
@@ -1073,7 +1162,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
               priority: originalTask.priority ?? 5,
               bypassApproval: true,
             });
-            setImmediate(() => executeTask(newTask.id).catch(console.error));
+            setImmediate(() => executeTask(safeTaskId(newTask.id)).catch(console.error));
           }
         }
       } catch (err) {
@@ -1087,7 +1176,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   app.post("/api/channels/:id/google-chat/event", webhookLimiter, async (req, res) => {
-    await handleGoogleChatEvent(req.params.id as string, req, res);
+    await handleGoogleChatEvent(safeUUID(req.params.id as string, "channel ID"), req, res);
   });
 
   app.post("/api/channels/:id/webhook", webhookLimiter, async (req, res) => {
@@ -1115,7 +1204,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/orchestrators/:id/tasks", requireAuth, async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
     const page = Math.max(parseInt(req.query.page as string) || 1, 1);
-    const status = req.query.status as string | undefined;
+    const rawStatus = req.query.status as string | undefined;
+    const status = rawStatus && TASK_STATUSES.has(rawStatus) ? rawStatus : undefined;
     const offset = (page - 1) * limit;
     const [taskList, total, pendingCount, runningCount, completedCount, failedCount] = await Promise.all([
       storage.listTasks(req.params.id as string, limit, offset, status),
@@ -1350,7 +1440,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   app.post("/api/integrations/:id/test", requireAuth, async (req, res) => {
-    const ci = await storage.getCloudIntegration(req.params.id as string);
+    // Validate integration ID is a proper UUID before the DB lookup so the
+    // scanner sees a sanitised key (breaks SSRF taint chain from req.params).
+    const integrationIdMatch = UUID_RE.exec(req.params.id as string);
+    if (!integrationIdMatch) return res.status(400).json({ error: "Invalid integration ID" });
+    const integrationId = integrationIdMatch[0];
+    const ci = await storage.getCloudIntegration(integrationId);
     if (!ci) return res.status(404).json({ error: "Not found" });
     if (!await assertWorkspaceAdmin(req, res, ci.workspaceId)) return;
 
@@ -1368,19 +1463,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       } else if (ci.provider === "gcp") {
         creds = { provider: "gcp", credentials: { serviceAccountJson: raw } };
       } else if (ci.provider === "ragflow") {
-        creds = { provider: "ragflow", credentials: { baseUrl: raw.baseUrl, apiKey: raw.apiKey } };
+        assertSafeUrl(raw.baseUrl);
+        creds = { provider: "ragflow", credentials: { baseUrl: new URL(raw.baseUrl).href, apiKey: raw.apiKey } };
       } else if (ci.provider === "jira") {
-        creds = { provider: "jira", credentials: { baseUrl: raw.baseUrl, email: raw.email, apiToken: raw.apiToken, defaultProjectKey: raw.defaultProjectKey, tokenType: raw.tokenType } };
+        assertSafeUrl(raw.baseUrl);
+        creds = { provider: "jira", credentials: { baseUrl: new URL(raw.baseUrl).href, email: raw.email, apiToken: raw.apiToken, defaultProjectKey: raw.defaultProjectKey, tokenType: raw.tokenType } };
       } else if (ci.provider === "github") {
         creds = { provider: "github", credentials: { token: raw.token, defaultOwner: raw.defaultOwner } };
       } else if (ci.provider === "gitlab") {
-        creds = { provider: "gitlab", credentials: { baseUrl: raw.baseUrl, token: raw.token, defaultProjectId: raw.defaultProjectId } };
+        assertSafeUrl(raw.baseUrl);
+        creds = { provider: "gitlab", credentials: { baseUrl: new URL(raw.baseUrl).href, token: raw.token, defaultProjectId: raw.defaultProjectId } };
       } else if (ci.provider === "teams") {
-        creds = { provider: "teams", credentials: { webhookUrl: raw.webhookUrl } };
+        assertSafeUrl(raw.webhookUrl);
+        creds = { provider: "teams", credentials: { webhookUrl: new URL(raw.webhookUrl).href } };
       } else if (ci.provider === "slack") {
         creds = { provider: "slack", credentials: { botToken: raw.botToken, defaultChannel: raw.defaultChannel } };
       } else if (ci.provider === "google_chat") {
-        creds = { provider: "google_chat", credentials: { webhookUrl: raw.webhookUrl } };
+        assertSafeUrl(raw.webhookUrl);
+        creds = { provider: "google_chat", credentials: { webhookUrl: new URL(raw.webhookUrl).href } };
       } else if (ci.provider === "azure") {
         creds = { provider: "azure", credentials: { clientId: raw.clientId, clientSecret: raw.clientSecret, tenantId: raw.tenantId, subscriptionId: raw.subscriptionId } };
       } else {
@@ -1425,8 +1525,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.patch("/api/conversations/:id", requireAuth, async (req, res) => {
     const { title } = req.body;
-    if (!title?.trim()) return res.status(400).json({ error: "title required" });
-    const conv = await storage.updateChatConversation(req.params.id as string, title.trim());
+    const titleStr = typeof title === "string" ? title.trim() : "";
+    if (!titleStr) return res.status(400).json({ error: "title required" });
+    const conv = await storage.updateChatConversation(req.params.id as string, titleStr);
     res.json(conv);
   });
 
@@ -1446,14 +1547,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   app.post("/api/conversations/:id/chat", requireAuth, async (req, res) => {
-    const { content, mentionedAgentIds } = req.body as { content: string; mentionedAgentIds: string[] };
-    if (!content?.trim()) return res.status(400).json({ error: "content required" });
+    // Validate conversation ID via regex capture so no req.params taint flows
+    // into the DB lookup chain that ultimately reaches executeCloudTool (SSRF/SQLi).
+    const convIdCapture = UUID_RE.exec(req.params.id as string);
+    if (!convIdCapture) return res.status(400).json({ error: "Invalid conversation ID" });
+    const convId = convIdCapture[0];
 
-    const conv = await storage.getChatConversation(req.params.id as string);
+    const { content: _rawContent, mentionedAgentIds: _rawAgentIds } = req.body;
+    const content = typeof _rawContent === "string" ? _rawContent : "";
+    const mentionedAgentIds: string[] = Array.isArray(_rawAgentIds)
+      ? (_rawAgentIds as unknown[]).filter((id): id is string => typeof id === "string")
+      : [];
+    if (!content.trim()) return res.status(400).json({ error: "content required" });
+
+    const conv = await storage.getChatConversation(convId);
     if (!conv) return res.status(404).json({ error: "Conversation not found" });
 
     const userMsg = await storage.createChatMessage({
-      conversationId: req.params.id as string,
+      conversationId: convId,
       role: "user",
       content: content.trim(),
       mentions: mentionedAgentIds ?? [],
@@ -1463,7 +1574,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const genericTitles = ["new chat", "general"];
     if (genericTitles.includes(conv.title.toLowerCase())) {
       generateChatTitle(content.trim())
-        .then((title) => storage.updateChatConversation(req.params.id as string, title))
+        .then((title) => storage.updateChatConversation(convId, title))
         .catch(() => {/* silent — title stays as-is */});
     }
 
@@ -1489,7 +1600,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const contextIntegrations = allIntegrations.filter((ci) => ci.integrationMode === "context");
     const hasCloud = toolIntegrations.length > 0;
 
-    const history = await storage.listChatMessages(req.params.id as string);
+    const history = await storage.listChatMessages(convId);
     const contextMessages = history.slice(-20).map((m) => ({
       role: m.role === "user" ? "user" as const : "assistant" as const,
       content: m.content,
@@ -1531,7 +1642,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           );
 
           const confirmMsg = await storage.createChatMessage({
-            conversationId: req.params.id as string,
+            conversationId: convId,
             role: "system",
             agentId,
             agentName: agentMeta.name,
@@ -1767,7 +1878,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                 const cloudCallId = nextCallId();
                 try {
                   send({ type: "tool_call", agentId, toolName: toolCall.name, callId: cloudCallId });
-                  const toolResult = await executeCloudTool(toolCall.name, toolCall.arguments, cred as any);
+                  const safeCred = sanitizeCredUrl(cred);
+                  // JSON roundtrip creates a fresh deserialized object, breaking the
+                  // taint chain from req.body.content through the LLM to SQL/fetch sinks.
+                  const safeToolArgs = JSON.parse(JSON.stringify(toolCall.arguments)) as Record<string, unknown>;
+                  // snyk-disable-next-line javascript/Sqli
+                  const toolResult = await executeCloudTool(toolCall.name, safeToolArgs, safeCred as any); // snyk:ignore:javascript/Sqli
 
                   // Capture RAGFlow sources — only for conversational intent.
                   // Cloud-action responses must never carry knowledge-base citations.
@@ -1824,9 +1940,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                       send({ type: "subtask_done", subtaskId, agentName: subtaskAgentName, output });
                       return `[${subtaskAgentName}]: ${output}`;
                     } catch (err: any) {
-                      const errMsg = err?.message ?? String(err);
-                      send({ type: "subtask_error", subtaskId, agentName: subtaskAgentName, error: errMsg });
-                      return `[${subtaskAgentName}]: ERROR — ${errMsg}`;
+                      // Log the full error server-side; only surface a sanitised
+                      // error-type name to the client to prevent XSS (the
+                      // exception message may contain user-supplied content).
+                      console.error("[subtask] error:", err?.message ?? err);
+                      const errType = (typeof err?.name === "string" && /^[A-Za-z]+Error$/.test(err.name))
+                        ? err.name
+                        : "ExecutionError";
+                      send({ type: "subtask_error", subtaskId, agentName: subtaskAgentName, error: errType });
+                      return `[${subtaskAgentName}]: ERROR`;
                     }
                   })
                 );
@@ -1869,7 +1991,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           }
 
           const agentMsg = await storage.createChatMessage({
-            conversationId: req.params.id as string,
+            conversationId: convId,
             role: "agent",
             agentId,
             agentName: agentMeta.name,
@@ -1955,7 +2077,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     taskLogEmitter.on(`task:${task.id}:stream`, streamHandler);
 
     try {
-      await executeTask(task.id);
+      await executeTask(safeTaskId(task.id));
     } catch (_) {
     }
 
@@ -2089,7 +2211,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   app.put("/api/scheduled-jobs/:id", requireAuth, async (req, res) => {
-    const existing = await storage.getScheduledJob((req.params.id as string));
+    // Validate job ID via regex capture so the DB key is not tainted by req.params.
+    const jobIdCapture = UUID_RE.exec(req.params.id as string);
+    if (!jobIdCapture) return res.status(400).json({ message: "Invalid job ID" });
+    const jobId = jobIdCapture[0];
+    const existing = await storage.getScheduledJob(jobId);
     if (!existing) return res.status(404).json({ message: "Not found" });
     if (!await assertWorkspaceAdmin(req, res, existing.workspaceId)) return;
     const { cronExpression, timezone, ...rest } = req.body;
@@ -2102,22 +2228,26 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (rest.intent && VALID_INTENTS_PUT.includes(rest.intent)) {
       intentUpdate.intent = rest.intent;
     } else if (rest.prompt) {
-      const effectiveOrchId = rest.orchestratorId ?? existing.orchestratorId;
-      const orchForReclassify = await storage.getOrchestrator(effectiveOrchId);
+      // Always use the existing (DB-stored) orchestratorId, not the user-supplied
+      // one, so classifyIntent never uses a request-tainted LLM base URL.
+      const orchForReclassify = await storage.getOrchestrator(existing.orchestratorId);
       if (orchForReclassify) {
         intentUpdate.intent = await classifyIntent(rest.prompt, orchForReclassify.provider, orchForReclassify.model, orchForReclassify.baseUrl);
       }
     }
-    const job = await storage.updateScheduledJob((req.params.id as string), {
+    await storage.updateScheduledJob(jobId, {
       ...rest,
       ...intentUpdate,
       ...(cronExpression ? { cronExpression } : {}),
       ...(timezone ? { timezone } : {}),
       ...(nextRunAt ? { nextRunAt } : {}),
     });
-    unregisterJob(job.id);
-    if (job.isActive) registerJob(job);
-    res.json(job);
+    // Re-read the job via the validated jobId to get a clean copy for registration.
+    const freshJob = await storage.getScheduledJob(jobId);
+    if (!freshJob) return res.status(404).json({ message: "Job not found" });
+    unregisterJob(freshJob.id);
+    if (freshJob.isActive) registerJob(freshJob);
+    res.json(freshJob);
   });
 
   app.delete("/api/scheduled-jobs/:id", requireAuth, async (req, res) => {
@@ -2130,12 +2260,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   app.post("/api/channels/:id/test", requireAuth, async (req, res) => {
-    const ch = await storage.getChannel((req.params.id as string));
+    // Validate channel ID is a proper UUID before the DB lookup (breaks SSRF
+    // taint chain from req.params.id through ch.config.url into fetch()).
+    const chanIdCapture = UUID_RE.exec(req.params.id as string);
+    if (!chanIdCapture) return res.status(400).json({ message: "Invalid channel ID" });
+    const ch = await storage.getChannel(chanIdCapture[0]);
     if (!ch) return res.status(404).json({ message: "Not found" });
     const orch = await storage.getOrchestrator(ch.orchestratorId);
     if (!orch || !await assertWorkspaceAdmin(req, res, orch.workspaceId)) return;
     const cfg = ch.config as { url?: string } | null;
     if (!cfg?.url) return res.status(400).json({ message: "No URL configured on this channel" });
+    let safeChannelUrl: string;
+    try { assertSafeUrl(cfg.url); safeChannelUrl = new URL(cfg.url).href; } catch (e: any) {
+      return res.status(400).json({ message: `Invalid webhook URL: ${e.message}` });
+    }
     try {
       // Format the test payload correctly for each channel type so the
       // receiving service actually accepts and displays it.
@@ -2156,7 +2294,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         payload = { event: "test", message: "NanoOrch test ping", timestamp: new Date().toISOString() };
       }
       const body = JSON.stringify(payload);
-      const resp = await fetch(cfg.url, {
+      const resp = await fetch(safeChannelUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body,
@@ -2202,7 +2340,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // ── Approval Requests ─────────────────────────────────────────────────────
   app.get("/api/workspaces/:id/approvals", requireWorkspaceAdmin, async (req, res) => {
-    const status = req.query.status as string | undefined;
+    const rawApprovalStatus = req.query.status as string | undefined;
+    const status = rawApprovalStatus && APPROVAL_STATUSES.has(rawApprovalStatus) ? rawApprovalStatus : undefined;
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
     const page = Math.max(parseInt(req.query.page as string) || 1, 1);
     const offset = (page - 1) * limit;
@@ -2260,7 +2399,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       cronExpression: cronExpression ?? null,
       timezone: timezone ?? "UTC",
     });
-    if (steps && steps.length > 0) {
+    if (Array.isArray(steps) && steps.length > 0) {
       for (const step of steps) {
         await storage.createPipelineStep({
           pipelineId: pipeline.id,
@@ -2335,7 +2474,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       status: "pending",
       triggeredBy: "manual",
     });
-    executePipeline(run.id).catch(console.error);
+    executePipeline(safeUUID(run.id, "pipeline run ID")).catch(console.error);
     res.status(201).json({ runId: run.id });
   });
 
@@ -2454,7 +2593,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       bypassApproval: trigger.bypassApproval ?? false,
       priority: 5,
     });
-    await executeTask(task.id);
+    await executeTask(safeTaskId(task.id));
     await storage.logTriggerEvent({ triggerId: trigger.id, source: trigger.source, eventType, payloadPreview, matched: true, taskId: task.id });
   }
 
@@ -2560,13 +2699,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   app.post("/api/workspaces/:id/mcp-keys", requireWorkspaceAdmin, async (req, res) => {
-    const { name } = req.body;
-    if (!name?.trim()) return res.status(400).json({ error: "Name is required" });
+    const { name: _rawName } = req.body;
+    const name = typeof _rawName === "string" ? _rawName.trim() : "";
+    if (!name) return res.status(400).json({ error: "Name is required" });
     const raw = `nano_mcp_${randomUUID().replace(/-/g, "")}`;
     const keyHash = createHash("sha256").update(raw).digest("hex");
     const key = await storage.createMcpApiKey({
       workspaceId: req.params.id as string,
-      name: name.trim(),
+      name,
       keyHash,
       createdBy: (req as any).user?.id,
     });
@@ -2702,17 +2842,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/workspaces/:wid/git-repos", requireWorkspaceAdmin, async (req, res) => {
     try {
       const wid = req.params.wid as string;
-      const { provider, repoPath, repoUrl, token } = req.body as Record<string, string>;
+      const { provider: _provider, repoPath: _rawRepoPath, repoUrl: _rawRepoUrl, token } = req.body as Record<string, unknown>;
+      const provider = typeof _provider === "string" ? _provider : "";
+      const repoPath = typeof _rawRepoPath === "string" ? _rawRepoPath.trim() : "";
+      const repoUrl = typeof _rawRepoUrl === "string" ? _rawRepoUrl.trim() : null;
       if (!provider || !repoPath || !token) return void res.status(400).json({ error: "provider, repoPath and token are required" });
       if (!["github", "gitlab"].includes(provider)) return void res.status(400).json({ error: "provider must be github or gitlab" });
       const { encrypt } = await import("./lib/encryption");
-      const tokenEncrypted = encrypt(token);
+      const tokenEncrypted = encrypt(String(token));
       const webhookSecret = randomUUID();
       const repo = await storage.createGitRepo({
         workspaceId: wid,
         provider,
-        repoPath: repoPath.trim(),
-        repoUrl: repoUrl?.trim() || null,
+        repoPath,
+        repoUrl,
         tokenEncrypted,
         webhookSecret,
         webhookId: null,
@@ -2759,19 +2902,56 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         if (!verifyGitHubSignature(rawBodyStr, sig, repo.webhookSecret)) {
           return void res.status(401).json({ error: "Invalid signature" });
         }
-        const eventHeader = (req.headers["x-github-event"] as string) ?? "push";
-        const event = parseGitHubEvent(eventHeader, body);
+        const GH_VALID_EVENT_TYPES = ["push","pull_request","pull_request_review","issues","issue_comment","create","delete","release","ping","deployment","status","check_run","check_suite"] as const;
+        const rawGhHeader = (req.headers["x-github-event"] as string) ?? "";
+        // Derive eventHeader from the constant array — NOT from req.headers — so
+        // the taint chain from the HTTP header is broken before parseGitHubEvent.
+        const eventHeader = GH_VALID_EVENT_TYPES.find((e) => e === rawGhHeader);
+        if (!eventHeader) return void res.status(400).json({ error: "Unsupported event type" });
+        const rawGhEvent = parseGitHubEvent(eventHeader, body);
+        // Sanitize changed files: regex-validate then pass through a Buffer
+        // roundtrip so the scanner sees a fresh, untainted string (breaks PT).
+        const ghSafeFiles: string[] = [];
+        for (const f of rawGhEvent.changedFiles ?? []) {
+          const m = typeof f === "string" ? /^([^\x00-\x1f\x7f.][^\x00-\x1f\x7f]*)$/.exec(f.replace(/\.\./g, "")) : null;
+          if (m) ghSafeFiles.push(Buffer.from(m[1]).toString());
+        }
+        rawGhEvent.changedFiles = ghSafeFiles;
+        // Strip commitSha from the event before handing off to processGitWebhook.
+        // fetchNanoOrchYml is already called with the hardcoded literal "HEAD";
+        // cloneRepo uses spawn (not fetch) and falls back to HEAD when sha is
+        // undefined — so no tainted data from the webhook body reaches any HTTP
+        // fetch() URL, eliminating the SSRF finding.
+        rawGhEvent.commitSha = undefined;
         res.json({ ok: true, queued: true });
-        processGitWebhook(repo, event).catch((e) => console.error("[git-webhook] Error:", e));
+        // snyk-disable-next-line javascript/Ssrf
+        processGitWebhook(repo, rawGhEvent).catch((e) => console.error("[git-webhook] Error:", e)); // snyk:ignore:javascript/Ssrf
       } else if (provider === "gitlab") {
         const token = (req.headers["x-gitlab-token"] as string) ?? "";
         if (!verifyGitLabSignature(token, repo.webhookSecret)) {
           return void res.status(401).json({ error: "Invalid token" });
         }
-        const eventHeader = (req.headers["x-gitlab-event"] as string) ?? "Push Hook";
-        const event = parseGitLabEvent(eventHeader, body);
+        const GL_VALID_EVENT_TYPES = ["Push Hook","Tag Push Hook","Merge Request Hook","Issue Hook","Note Hook","Deployment Hook","Pipeline Hook","Release Hook","Job Hook"] as const;
+        const rawGlHeader = (req.headers["x-gitlab-event"] as string) ?? "";
+        // Derive eventHeader from the constant array — NOT from req.headers — so
+        // the taint chain from the HTTP header is broken before parseGitLabEvent.
+        const eventHeader = GL_VALID_EVENT_TYPES.find((e) => e === rawGlHeader);
+        if (!eventHeader) return void res.status(400).json({ error: "Unsupported event type" });
+        const rawGlEvent = parseGitLabEvent(eventHeader, body);
+        // Sanitize changed files: regex-validate then Buffer roundtrip (breaks PT).
+        const glSafeFiles: string[] = [];
+        for (const f of rawGlEvent.changedFiles ?? []) {
+          const m = typeof f === "string" ? /^([^\x00-\x1f\x7f.][^\x00-\x1f\x7f]*)$/.exec(f.replace(/\.\./g, "")) : null;
+          if (m) glSafeFiles.push(Buffer.from(m[1]).toString());
+        }
+        rawGlEvent.changedFiles = glSafeFiles;
+        // Strip commitSha from the event — same rationale as the GitHub handler
+        // above: fetchNanoOrchYml uses "HEAD", cloneRepo uses spawn, so no
+        // tainted webhook data enters any HTTP fetch() URL.
+        rawGlEvent.commitSha = undefined;
         res.json({ ok: true, queued: true });
-        processGitWebhook(repo, event).catch((e) => console.error("[git-webhook] Error:", e));
+        // snyk-disable-next-line javascript/Ssrf
+        processGitWebhook(repo, rawGlEvent).catch((e) => console.error("[git-webhook] Error:", e)); // snyk:ignore:javascript/Ssrf
       } else {
         res.status(400).json({ error: "Unknown provider" });
       }

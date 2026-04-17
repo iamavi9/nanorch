@@ -1,6 +1,9 @@
 import type { Request, Response } from "express";
 import { storage } from "../storage";
 import { executeTask } from "../engine/executor";
+import { assertSafeUrl } from "../lib/ssrf-guard";
+
+const TASK_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface GoogleChatChannelConfig {
   url?: string;
@@ -24,6 +27,7 @@ function stripBotMention(text: string): string {
 
 async function postGoogleChatReply(webhookUrl: string, text: string): Promise<void> {
   try {
+    assertSafeUrl(webhookUrl);
     await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -150,6 +154,7 @@ async function processGoogleChatMessage(
   });
 
   try {
+    if (!TASK_UUID_RE.test(task.id)) throw new Error("Invalid task ID");
     await executeTask(task.id);
   } catch (err) {
     console.error("[google-chat] Task execution error:", err);

@@ -1,5 +1,6 @@
 import { executeKubernetesTool, validateKubernetesCredentials, type KubernetesCredentials } from "./kubernetes";
 export type { KubernetesCredentials };
+import { assertSafeUrl } from "../lib/ssrf-guard";
 import { EC2Client, DescribeInstancesCommand } from "@aws-sdk/client-ec2";
 import { S3Client, ListBucketsCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
@@ -118,6 +119,7 @@ export async function validateCredentials(creds: CloudCredentials): Promise<{ ok
       const { baseUrl, apiKey } = creds.credentials;
       if (!baseUrl) throw new Error("RAGFlow Base URL is required");
       if (!apiKey) throw new Error("RAGFlow API Key is required");
+      assertSafeUrl(baseUrl);
       const url = `${baseUrl.replace(/\/$/, "")}/api/v1/datasets?page=1&page_size=1`;
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
@@ -132,6 +134,7 @@ export async function validateCredentials(creds: CloudCredentials): Promise<{ ok
       if (!baseUrl) throw new Error("Jira Base URL is required");
       if (!email) throw new Error("Jira email is required");
       if (!apiToken) throw new Error("Jira API token is required");
+      assertSafeUrl(baseUrl);
       const base = baseUrl.replace(/\/$/, "");
       const auth = Buffer.from(`${email}:${apiToken}`).toString("base64");
       const res = await fetch(`${base}/rest/api/3/myself`, {
@@ -154,6 +157,7 @@ export async function validateCredentials(creds: CloudCredentials): Promise<{ ok
       const { baseUrl, token } = creds.credentials;
       if (!baseUrl) throw new Error("GitLab Base URL is required");
       if (!token) throw new Error("GitLab token is required");
+      assertSafeUrl(baseUrl);
       const base = baseUrl.replace(/\/$/, "");
       const res = await fetch(`${base}/api/v4/user`, {
         headers: { "PRIVATE-TOKEN": token, Accept: "application/json" },
@@ -165,9 +169,7 @@ export async function validateCredentials(creds: CloudCredentials): Promise<{ ok
     if (creds.provider === "teams") {
       const { webhookUrl } = creds.credentials;
       if (!webhookUrl) throw new Error("Teams webhook URL is required");
-      if (!webhookUrl.startsWith("https://")) {
-        throw new Error("Teams webhook URL must start with https://");
-      }
+      assertSafeUrl(webhookUrl);
       const isConnector = webhookUrl.includes("webhook.office.com");
       const testBody = isConnector
         ? {
@@ -233,6 +235,7 @@ export async function validateCredentials(creds: CloudCredentials): Promise<{ ok
       if (!instanceUrl) throw new Error("ServiceNow Instance URL is required");
       if (!username) throw new Error("ServiceNow username is required");
       if (!password) throw new Error("ServiceNow password is required");
+      assertSafeUrl(instanceUrl);
       const base = instanceUrl.replace(/\/$/, "");
       const auth = Buffer.from(`${username}:${password}`).toString("base64");
       const res = await fetch(`${base}/api/now/table/sys_user?sysparm_query=user_name=${encodeURIComponent(username)}&sysparm_limit=1&sysparm_fields=user_name,name,email`, {
@@ -455,6 +458,7 @@ function extractRAGFlowChunks(data: any): Array<{ content: string; score: number
 }
 
 async function executeRAGFlowTool(name: string, args: Record<string, string>, creds: RAGFlowCredentials): Promise<unknown> {
+  assertSafeUrl(creds.baseUrl);
   const base = creds.baseUrl.replace(/\/$/, "");
   const headers = { Authorization: `Bearer ${creds.apiKey}`, "Content-Type": "application/json" };
 
@@ -504,6 +508,7 @@ async function executeRAGFlowTool(name: string, args: Record<string, string>, cr
 }
 
 async function executeJiraTool(name: string, args: Record<string, string>, creds: JiraCredentials): Promise<unknown> {
+  assertSafeUrl(creds.baseUrl);
   const base = creds.baseUrl.replace(/\/$/, "");
   const auth = Buffer.from(`${creds.email}:${creds.apiToken}`).toString("base64");
   const headers = { Authorization: `Basic ${auth}`, Accept: "application/json", "Content-Type": "application/json" };
@@ -765,6 +770,7 @@ async function executeGitHubTool(name: string, args: Record<string, string>, cre
 }
 
 async function executeGitLabTool(name: string, args: Record<string, string>, creds: GitLabCredentials): Promise<unknown> {
+  assertSafeUrl(creds.baseUrl);
   const base = creds.baseUrl.replace(/\/$/, "");
   const headers = { "PRIVATE-TOKEN": creds.token, Accept: "application/json", "Content-Type": "application/json" };
 
@@ -848,6 +854,7 @@ async function executeGitLabTool(name: string, args: Record<string, string>, cre
 
 async function executeTeamsTool(name: string, args: Record<string, string>, creds: TeamsCredentials): Promise<unknown> {
   const { webhookUrl } = creds;
+  assertSafeUrl(webhookUrl);
 
   // Detect URL type: old Office 365 Connectors vs new Power Automate Workflows
   const isConnector = webhookUrl.includes("webhook.office.com");
@@ -1052,6 +1059,7 @@ async function executeGoogleChatTool(name: string, args: Record<string, string>,
 }
 
 async function executeServiceNowTool(name: string, args: Record<string, string>, creds: ServiceNowCredentials): Promise<unknown> {
+  assertSafeUrl(creds.instanceUrl);
   const base = creds.instanceUrl.replace(/\/$/, "");
   const auth = Buffer.from(`${creds.username}:${creds.password}`).toString("base64");
   const headers = {
@@ -2054,6 +2062,7 @@ export async function retrieveRAGFlowContext(
   question: string,
   creds: RAGFlowCredentials,
 ): Promise<Array<{ content: string; documentName: string; score: number }>> {
+  assertSafeUrl(creds.baseUrl);
   const base = creds.baseUrl.replace(/\/$/, "");
   const headers = { Authorization: `Bearer ${creds.apiKey}`, "Content-Type": "application/json" };
 

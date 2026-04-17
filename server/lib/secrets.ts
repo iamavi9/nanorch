@@ -15,6 +15,8 @@ import { readFileSync } from "fs";
  *     - session_secret
  */
 export function loadSecret(name: string): string | undefined {
+  // Restrict name to safe identifier characters to prevent any env key injection
+  if (!/^[A-Z0-9_]+$/i.test(name)) return undefined;
   const filePath = process.env[`${name}_FILE`];
   if (filePath) {
     try {

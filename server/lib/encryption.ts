@@ -8,9 +8,19 @@ function getKey(): Buffer {
   if (encKey) {
     const hex = encKey.replace(/\s/g, "");
     if (hex.length === 64) {
+      // Direct 32-byte key — no KDF/salt needed
       return Buffer.from(hex, "hex");
     }
-    return scryptSync(encKey, "nanoclaw-salt", 32);
+    // Passphrase mode: require ENCRYPTION_KEY_SALT (no hardcoded fallback)
+    const kdfSalt = loadSecret("ENCRYPTION_KEY_SALT");
+    if (!kdfSalt) {
+      throw new Error(
+        "[encryption] Set ENCRYPTION_KEY_SALT when ENCRYPTION_KEY is a passphrase. " +
+        "For backward compatibility with the default deployment, set it to the value " +
+        "documented in the project README.",
+      );
+    }
+    return scryptSync(encKey, kdfSalt, 32);
   }
 
   const sessionSecret = loadSecret("SESSION_SECRET");
@@ -20,7 +30,15 @@ function getKey(): Buffer {
       "Set at least SESSION_SECRET (or preferably ENCRYPTION_KEY) before starting the app.",
     );
   }
-  return scryptSync(sessionSecret, "nanoclaw-salt", 32);
+  const kdfSalt = loadSecret("ENCRYPTION_KEY_SALT");
+  if (!kdfSalt) {
+    throw new Error(
+      "[encryption] Set ENCRYPTION_KEY_SALT when using SESSION_SECRET for encryption. " +
+      "For backward compatibility with the default deployment, set it to the value " +
+      "documented in the project README.",
+    );
+  }
+  return scryptSync(sessionSecret, kdfSalt, 32);
 }
 
 interface EncryptedPayload {
@@ -49,7 +67,7 @@ export function decrypt(encryptedBase64: string): string {
   const iv = Buffer.from(payload.iv, "base64");
   const tag = Buffer.from(payload.tag, "base64");
   const ciphertext = Buffer.from(payload.ciphertext, "base64");
-  const decipher = createDecipheriv(ALGORITHM, key, iv);
+  const decipher = createDecipheriv(ALGORITHM, key, iv, { authTagLength: 16 });
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
 }

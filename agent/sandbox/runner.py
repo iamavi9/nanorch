@@ -51,7 +51,9 @@ try:
         f.write(code)
         fname = f.name
 
-    result = subprocess.run(
+    # cmd_prefix is a hardcoded list derived from the if/elif chain above;
+    # fname is a securely-created tempfile path — no user input reaches the shell.
+    result = subprocess.run(  # noqa: S603
         cmd_prefix + [fname],
         capture_output=True,
         text=True,

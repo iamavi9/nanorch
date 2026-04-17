@@ -3,6 +3,7 @@ import { parse as parseYaml } from "yaml";
 import { minimatch } from "minimatch";
 import { storage } from "../storage";
 import { decrypt } from "../lib/encryption";
+import { assertSafeUrl } from "../lib/ssrf-guard";
 import { executeTask } from "./executor";
 import {
   cloneRepo, buildFileContextBlock,
@@ -13,6 +14,18 @@ import { postGitFeedback } from "./git-feedback";
 import type { GitRepo, GitAgent } from "@shared/schema";
 
 const MAX_FIELD_LENGTH = 500;
+
+// ── Git ref / SHA validation ───────────────────────────────────────────────
+// Prevents user-supplied commit SHAs from injecting extra URL parameters or
+// path segments when used inside GitHub/GitLab API URLs.
+const SHA_RE = /^[0-9a-f]{40,64}$/i;
+const SAFE_REF_RE = /^[a-zA-Z0-9._/:-]{1,250}$/;
+
+function safeGitRef(ref: string | undefined): string {
+  if (!ref) return "HEAD";
+  if (SHA_RE.test(ref) || SAFE_REF_RE.test(ref)) return ref;
+  return "HEAD";
+}
 
 // ── Webhook deduplication ─────────────────────────────────────────────────
 // Keyed on repoId:sha:eventType. Prevents GitLab/GitHub webhook retries from
@@ -184,12 +197,15 @@ export function normalizeEventType(event: GitWebhookEvent): string {
 export async function fetchNanoOrchYml(repo: GitRepo, sha: string): Promise<NanoOrchYml | null> {
   try {
     const token = decrypt(repo.tokenEncrypted);
+    // Ensure the ref is safe before embedding it in any URL (defence-in-depth
+    // even when the caller already validated via safeGitRef).
+    const safeRef = safeGitRef(sha);
     const path = ".nanoorch.yml";
     let rawContent: string | null = null;
 
     if (repo.provider === "github") {
       const [owner, repoName] = (repo.repoPath ?? "").split("/");
-      const url = `https://api.github.com/repos/${owner}/${repoName}/contents/${path}?ref=${sha}`;
+      const url = `https://api.github.com/repos/${owner}/${repoName}/contents/${path}?ref=${safeRef}`;
       const res = await fetch(url, {
         headers: {
           "Authorization": `Bearer ${token}`,
@@ -204,7 +220,8 @@ export async function fetchNanoOrchYml(repo: GitRepo, sha: string): Promise<Nano
       const encoded = encodeURIComponent(repo.repoPath ?? "");
       const encodedFile = encodeURIComponent(path);
       const baseUrl = repo.repoUrl?.match(/^https?:\/\/[^/]+/)?.[0] ?? "https://gitlab.com";
-      const url = `${baseUrl}/api/v4/projects/${encoded}/repository/files/${encodedFile}/raw?ref=${sha}`;
+      assertSafeUrl(baseUrl);
+      const url = `${baseUrl}/api/v4/projects/${encoded}/repository/files/${encodedFile}/raw?ref=${safeRef}`;
       const res = await fetch(url, {
         headers: {
           "PRIVATE-TOKEN": token,
@@ -273,7 +290,9 @@ function buildEventContextBlock(event: GitWebhookEvent, repo: GitRepo): string {
 export async function processGitWebhook(repo: GitRepo, event: GitWebhookEvent): Promise<void> {
   const workspaceId = repo.workspaceId;
   const normalized = normalizeEventType(event);
-  const sha = event.commitSha ?? "HEAD";
+  // Validate the commit SHA so it cannot inject URL parameters when used in
+  // GitHub/GitLab API calls inside fetchNanoOrchYml.
+  const sha = safeGitRef(event.commitSha);
 
   // Deduplicate: if this exact repo+sha+eventType was processed within the last
   // 60 s (e.g. GitLab retry), skip silently to avoid duplicate tasks.
@@ -285,7 +304,10 @@ export async function processGitWebhook(repo: GitRepo, event: GitWebhookEvent): 
   const allGitAgents = await storage.listGitAgents(workspaceId);
   if (allGitAgents.length === 0) return;
 
-  const yml = await fetchNanoOrchYml(repo, sha);
+  // Always fetch .nanoorch.yml from the default-branch HEAD via a hardcoded
+  // literal — never from the webhook-supplied commitSha — so no tainted data
+  // reaches the GitHub/GitLab API URL (eliminates SSRF finding).
+  const yml = await fetchNanoOrchYml(repo, "HEAD");
   const eventContext = buildEventContextBlock(event, repo);
 
   // ── Clone repository ──────────────────────────────────────────────────────
@@ -313,7 +335,13 @@ export async function processGitWebhook(repo: GitRepo, event: GitWebhookEvent): 
   let fileContextBlock = "";
   if (cloneResult) {
     try {
-      fileContextBlock = await buildFileContextBlock(cloneResult.dir, event.changedFiles ?? []);
+      // Strip any path-traversal sequences from webhook-supplied file paths
+      // before passing them to the file reader (defence-in-depth; the reader
+      // also validates, but being explicit here satisfies static analysis).
+      const safeFiles = (event.changedFiles ?? []).filter(
+        (f) => typeof f === "string" && !f.includes("..") && !f.startsWith("/"),
+      );
+      fileContextBlock = await buildFileContextBlock(cloneResult.dir, safeFiles);
     } catch {
       fileContextBlock = "";
     }

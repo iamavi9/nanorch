@@ -1,6 +1,15 @@
 import type { Request, Response } from "express";
 import { storage } from "../storage";
 import { executeTask } from "../engine/executor";
+import { assertSafeUrl } from "../lib/ssrf-guard";
+
+const TASK_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Validates a task UUID and returns it; throws if invalid. */
+function requireTaskUUID(id: string): string {
+  if (!TASK_UUID_RE.test(id)) throw new Error(`Not a valid task UUID: ${id}`);
+  return id;
+}
 
 export interface TeamsChannelConfig {
   appId?: string;
@@ -66,8 +75,10 @@ export async function replyToTeams(
   appId: string,
   appPassword: string,
 ): Promise<void> {
+  assertSafeUrl(serviceUrl);
+  const safeBase = new URL(serviceUrl).href.replace(/\/$/, "");
   const token = await getTeamsBotToken(appId, appPassword);
-  const url = `${serviceUrl.replace(/\/$/, "")}/v3/conversations/${conversationId}/activities/${activityId}`;
+  const url = `${safeBase}/v3/conversations/${conversationId}/activities/${activityId}`;
   await fetch(url, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -83,8 +94,10 @@ async function sendTeamsTyping(
   appPassword: string,
 ): Promise<void> {
   try {
+    assertSafeUrl(serviceUrl);
+    const safeTypingBase = new URL(serviceUrl).href.replace(/\/$/, "");
     const token = await getTeamsBotToken(appId, appPassword);
-    const url = `${serviceUrl.replace(/\/$/, "")}/v3/conversations/${conversationId}/activities`;
+    const url = `${safeTypingBase}/v3/conversations/${conversationId}/activities`;
     await fetch(url, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -243,7 +256,7 @@ export async function handleTeamsInteraction(channelId: string, req: Request, re
             priority: originalTask.priority ?? 5,
             bypassApproval: true,
           });
-          setImmediate(() => executeTask(newTask.id).catch(console.error));
+          try { const safeId = requireTaskUUID(newTask.id); setImmediate(() => executeTask(safeId).catch(console.error)); } catch { /* invalid ID */ }
         }
       }
     } catch (err) {
@@ -284,7 +297,7 @@ export async function handleTeamsEvent(channelId: string, req: Request, res: Res
 }
 
 async function processTeamsMessage(channelId: string, cfg: TeamsChannelConfig, activity: any): Promise<void> {
-  const rawText = (activity.text || "").replace(/<[^>]*>/g, "").trim();
+  const rawText = (typeof activity.text === "string" ? activity.text : "").replace(/<[^>]*>/g, "").trim();
   if (!rawText) return;
 
   const externalUserId = activity.from?.id ?? "";
@@ -383,5 +396,5 @@ async function processTeamsMessage(channelId: string, cfg: TeamsChannelConfig, a
     bypassApproval,
   });
 
-  setImmediate(() => executeTask(task.id).catch(console.error));
+  try { const safeId = requireTaskUUID(task.id); setImmediate(() => executeTask(safeId).catch(console.error)); } catch { /* invalid ID */ }
 }

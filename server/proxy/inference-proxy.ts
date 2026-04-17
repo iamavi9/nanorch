@@ -17,6 +17,7 @@ import https from "node:https";
 import http from "node:http";
 import { randomBytes } from "crypto";
 import { loadSecret } from "../lib/secrets";
+import { assertSafeUrl } from "../lib/ssrf-guard";
 
 // ── Token store ──────────────────────────────────────────────────────────────
 
@@ -203,12 +204,17 @@ export function createInferenceProxyRouter(): Router {
     // ── 3. Build target URL ──────────────────────────────────────────────────
     // req.path is the remainder after /:provider (e.g. /v1/chat/completions).
     // Strip the leading slash so pathSuffix = "v1/chat/completions".
-    const pathSuffix = req.path.replace(/^\//, "");
+    // Strip control characters from the path/query to prevent header injection.
+    const pathSuffix = req.path.replace(/^\//, "").replace(/[\x00-\x1f\x7f]/g, "");
     const baseUrl    = cfg.realBaseUrl().replace(/\/$/, "");
+    try { assertSafeUrl(baseUrl); } catch {
+      res.status(502).json({ error: "Provider base URL is not permitted." });
+      return;
+    }
     let   targetPath = `/${pathSuffix}`;
 
-    // Preserve query string
-    const qs = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
+    // Preserve query string (strip control characters)
+    const qs = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")).replace(/[\x00-\x1f\x7f]/g, "") : "";
     if (qs) targetPath += qs;
 
     const targetBase = new URL(baseUrl);

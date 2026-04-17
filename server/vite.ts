@@ -2,6 +2,7 @@ import { type Express } from "express";
 import { createServer as createViteServer, createLogger } from "vite";
 import { type Server } from "http";
 import viteConfig from "../vite.config";
+import rateLimit from "express-rate-limit";
 import fs from "fs";
 import path from "path";
 import { nanoid } from "nanoid";
@@ -31,9 +32,16 @@ export async function setupVite(server: Server, app: Express) {
 
   app.use(vite.middlewares);
 
-  app.use("/{*path}", async (req, res, next) => {
-    const url = req.originalUrl;
+  // Rate-limit the catch-all SPA handler in dev to prevent abuse of the
+  // repeated disk-read (index.html is reloaded on every request).
+  const devIndexRateLimit = rateLimit({
+    windowMs: 60_000,
+    max: 300,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
 
+  app.use("/{*path}", devIndexRateLimit, async (req, res, next) => {
     try {
       const clientTemplate = path.resolve(
         import.meta.dirname,
@@ -48,7 +56,9 @@ export async function setupVite(server: Server, app: Express) {
         `src="/src/main.tsx"`,
         `src="/src/main.tsx?v=${nanoid()}"`,
       );
-      const page = await vite.transformIndexHtml(url, template);
+      // Pass a static safe URL to transformIndexHtml — the user-supplied path
+      // is never interpolated into HTML, eliminating any XSS surface.
+      const page = await vite.transformIndexHtml("/", template);
       res.status(200).set({ "Content-Type": "text/html" }).end(page);
     } catch (e) {
       vite.ssrFixStacktrace(e as Error);

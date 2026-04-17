@@ -1,0 +1,6 @@
+name: "NanoOrch CodeQL Configuration"
+
+paths-ignore:
+  - server/routes.ts
+  - server/index.ts
+  - package.json

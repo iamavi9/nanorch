@@ -17,6 +17,16 @@ const DEFAULT_BRANDING: Branding = {
   updatedAt: new Date().toISOString(),
 };
 
+function isSafeUrl(url: string | null | undefined): boolean {
+  if (!url) return false;
+  try {
+    const { protocol } = new URL(url);
+    return protocol === "https:" || protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
 export function useBranding(): Branding {
   const { data } = useQuery<Branding>({
     queryKey: ["/api/settings/branding"],
@@ -32,7 +42,7 @@ export function useBranding(): Branding {
   }, [branding.appName]);
 
   useEffect(() => {
-    if (branding.faviconUrl) {
+    if (branding.faviconUrl && isSafeUrl(branding.faviconUrl)) {
       let link = document.querySelector<HTMLLinkElement>("link[rel~='icon']");
       if (!link) {
         link = document.createElement("link");
