@@ -37,6 +37,7 @@ export async function runOllama(options: RunAgentOptions): Promise<RunAgentResul
       messages,
       tools,
       tool_choice: "auto",
+      max_tokens: options.maxTokens ?? 4096,
       temperature: options.temperature !== undefined ? options.temperature / 100 : 0.7,
     });
 
@@ -56,6 +57,7 @@ export async function runOllama(options: RunAgentOptions): Promise<RunAgentResul
     model: options.model,
     messages,
     stream: true,
+    max_tokens: options.maxTokens ?? 4096,
     temperature: options.temperature !== undefined ? options.temperature / 100 : 0.7,
   });
 

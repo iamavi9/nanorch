@@ -14,7 +14,7 @@ NanoOrch is built with a Node.js + Express (TypeScript) backend and a React + Vi
 
 **Key Architectural Decisions:**
 - **Multi-tenancy:** Isolated workspaces for teams, each with configurable orchestrators.
-- **AI Providers:** Supports OpenAI, Anthropic, Gemini, and Ollama, configurable per orchestrator.
+- **AI Providers:** Supports OpenAI, Anthropic, Gemini, Ollama, and **vLLM** (self-hosted GPU clusters), configurable per orchestrator. vLLM API keys are stored AES-256-GCM encrypted per orchestrator.
 - **Task Execution:** In-process `LocalExecutor` for development and Docker-isolated `DockerExecutor` for production, using ephemeral containers for tasks.
 - **Real-time Communication:** Utilizes SSE for task log streaming and WebSockets for live log push.
 - **Authentication & Authorization:** Session-based authentication with `express-session` and 3-tier RBAC: global admin (`users.role="admin"`) → workspace admin (`workspace_members.role="admin"`) → member. Login response includes `workspaceAdminIds` for client-side routing. Optional **SSO** via OIDC (openid-client v6, PKCE+S256) or SAML 2.0 (@node-saml/node-saml); global admin manages providers at `/admin/sso`; users are auto-provisioned on first SSO login with the provider's `defaultRole`; CSRF exemptions apply to all SSO callback routes. `APP_URL` env var (optional) sets the canonical origin for callback/ACS/metadata URLs.
@@ -45,7 +45,9 @@ NanoOrch is built with a Node.js + Express (TypeScript) backend and a React + Vi
 - Integrated chat UI with agent mention functionality and chat-driven parallel multi-agent workflow support (coordinator agent can spawn specialist agents in parallel via `spawn_agent` tool; subtask progress shown in real-time in the chat bubble).
 - **Approval Gates:** Agents can call `request_approval` tool mid-task to pause and request human sign-off before executing high-impact actions. Pending approvals appear in the dedicated Approvals page with a sidebar badge count.
 - **Pipeline/DAG Chaining:** Sequential agent pipelines where each step's output is passed as context to the next step. Supports scheduled (cron) execution and manual triggers. Run history with step-level status tracking.
-- **Observability:** Token usage and cost tracking across all 4 providers (OpenAI, Anthropic, Gemini, Ollama). Recharts dashboard with daily usage charts, per-agent breakdown, and provider/model cost summaries.
+- **Observability:** Token usage and cost tracking across all providers (OpenAI, Anthropic, Gemini, Ollama, vLLM). Recharts dashboard with daily usage charts, per-agent breakdown, and provider/model cost summaries.
+- **Git Agents (repo-driven automation):** Connect Git repositories (GitHub/GitLab) to a workspace. A `.nanoorch.yml` file in the repo root defines agent automations triggered by push/PR/MR events. The platform polls for changes, dispatches matching agents, and posts structured feedback comments back to the PR/MR via the Git API.
+- **Database integrations:** Agents can connect to external PostgreSQL databases via 5 tools (`pg_list_schemas`, `pg_list_tables`, `pg_describe_table`, `pg_query` read-only SELECT, `pg_execute` write with mandatory approval gate). Connection strings are stored AES-256-GCM encrypted.
 - **Event-Driven Triggers:** Per-workspace webhook endpoints (`/api/webhooks/github/:id`, `/api/webhooks/gitlab/:id`, `/api/webhooks/jira/:id`) that fire an AI agent task on external events. GitHub and GitLab payloads are HMAC-SHA256 verified; Jira uses a shared secret token. Agent prompt supports `{{payload.field}}` template substitution. All webhook calls are logged to the `trigger_events` table for audit and debugging. Managed via the **Triggers** page in the workspace sidebar.
 - **Workspace Limits UI:** Global admins see a gear icon on each workspace card (WorkspacesPage). Clicking it opens a "Workspace Limits" dialog with two tabs — Resource Quotas (numeric inputs per resource type) and Allowed Providers (toggle-then-checkbox pattern for AI providers, cloud integrations, channel types).
 - **Two-way Slack/Teams/Google Chat inbound:** Comms workspaces receive messages from Slack (`app_mention`, `message.im`), Teams (Bot Framework activities), and Google Chat (webhook events), route them to agents, and post replies back to the originating thread or conversation. Includes DM allowlist, bypass-approval phrases, slash commands, typing indicators, image notes, and per-thread history.
@@ -63,6 +65,7 @@ NanoOrch is built with a Node.js + Express (TypeScript) backend and a React + Vi
     - Anthropic API
     - Gemini API
     - Ollama (local or remote instance, custom `baseUrl`)
+    - vLLM (self-hosted GPU cluster; OpenAI-compatible REST API; per-orchestrator encrypted API key)
 - **Cloud Providers:**
     - Amazon Web Services (AWS)
     - Google Cloud Platform (GCP)
@@ -75,6 +78,8 @@ NanoOrch is built with a Node.js + Express (TypeScript) backend and a React + Vi
     - GitLab
 - **ITSM Integrations:**
     - ServiceNow (Basic Auth: `instanceUrl` + `username` + `password`; 9 tools: `servicenow_search_records`, `servicenow_get_incident`, `servicenow_create_incident`, `servicenow_update_record`, `servicenow_add_work_note`, `servicenow_get_ritm`, `servicenow_create_ritm`, `servicenow_create_change_request`, `servicenow_get_catalog_items`)
+- **Database Integrations:**
+    - External PostgreSQL (connection string stored AES-256-GCM encrypted; 5 agent tools: `pg_list_schemas`, `pg_list_tables`, `pg_describe_table`, `pg_query` read-only SELECT, `pg_execute` write operations with built-in approval gate)
 - **Messaging Integrations (agent tools + two-way inbound):**
     - Slack (inbound two-way via Bot Token + Signing Secret; agent tools: `slack_send_message`, `slack_send_notification`)
     - Microsoft Teams (inbound two-way via Bot Framework App ID/Password; agent tool: `teams_send_message`)

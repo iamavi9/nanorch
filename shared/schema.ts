@@ -4,12 +4,12 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
 export const userRoleEnum = pgEnum("user_role", ["admin", "member"]);
-export const providerEnum = pgEnum("provider", ["openai", "anthropic", "gemini", "ollama"]);
+export const providerEnum = pgEnum("provider", ["openai", "anthropic", "gemini", "ollama", "vllm"]);
 export const orchestratorStatusEnum = pgEnum("orchestrator_status", ["active", "paused"]);
 export const taskStatusEnum = pgEnum("task_status", ["pending", "running", "completed", "failed"]);
 export const channelTypeEnum = pgEnum("channel_type", ["webhook", "api", "slack", "teams", "google_chat", "generic_webhook"]);
 export const logLevelEnum = pgEnum("log_level", ["info", "warn", "error"]);
-export const cloudProviderEnum = pgEnum("cloud_provider", ["aws", "gcp", "azure", "ragflow", "jira", "github", "gitlab", "teams", "slack", "google_chat", "servicenow"]);
+export const cloudProviderEnum = pgEnum("cloud_provider", ["aws", "gcp", "azure", "ragflow", "jira", "github", "gitlab", "teams", "slack", "google_chat", "servicenow", "postgresql", "kubernetes"]);
 
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -53,6 +53,7 @@ export const orchestrators = pgTable("orchestrators", {
   status: orchestratorStatusEnum("status").default("active"),
   failoverProvider: text("failover_provider"),
   failoverModel: text("failover_model"),
+  vllmApiKey: text("vllm_api_key"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -64,6 +65,7 @@ export const agents = pgTable("agents", {
   instructions: text("instructions"),
   tools: jsonb("tools").default([]),
   memoryEnabled: boolean("memory_enabled").default(false),
+  reactEnabled: boolean("react_enabled").default(false),
   maxTokens: integer("max_tokens").default(4096),
   temperature: integer("temperature").default(70),
   sandboxTimeoutSeconds: integer("sandbox_timeout_seconds"),
@@ -128,6 +130,8 @@ export const taskLogs = pgTable("task_logs", {
   message: text("message").notNull(),
   metadata: jsonb("metadata").default({}),
   timestamp: timestamp("timestamp").defaultNow(),
+  logType: text("log_type").default("info"),
+  parentLogId: integer("parent_log_id"),
 });
 
 export const agentMemory = pgTable("agent_memory", {
@@ -432,3 +436,90 @@ export const mcpApiKeys = pgTable("mcp_api_keys", {
 });
 
 export type McpApiKey = typeof mcpApiKeys.$inferSelect;
+
+// ── Git Agents (workspace-scoped, admin-controlled) ───────────────────────────
+export const gitAgents = pgTable("git_agents", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  slug: varchar("slug").notNull(),
+  description: text("description"),
+  orchestratorId: varchar("orchestrator_id").references(() => orchestrators.id, { onDelete: "set null" }),
+  systemPrompt: text("system_prompt").default(""),
+  tools: jsonb("tools").default([]),
+  memoryEnabled: boolean("memory_enabled").default(false),
+  outputConfig: jsonb("output_config").$type<{ defaultOutputs: Array<{ type: string; channel?: string; context?: string; onlyOnFailure?: boolean }> }>().default({ defaultOutputs: [] }),
+  approvalConfig: jsonb("approval_config").$type<{ required: boolean; channelId?: string; timeoutSeconds?: number }>().default({ required: false }),
+  isMandatory: boolean("is_mandatory").default(false),
+  requiresAdminApproval: boolean("requires_admin_approval").default(false),
+  isActive: boolean("is_active").default(true),
+  notifyChannelId: varchar("notify_channel_id"),
+  postGitComment: boolean("post_git_comment").default(true),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (t) => [unique("git_agents_workspace_slug").on(t.workspaceId, t.slug)]);
+
+// ── Git Repos (repositories connected to a workspace) ────────────────────────
+export const gitRepos = pgTable("git_repos", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  provider: text("provider").notNull(),
+  repoPath: text("repo_path").notNull(),
+  repoUrl: text("repo_url"),
+  tokenEncrypted: text("token_encrypted").notNull(),
+  webhookSecret: text("webhook_secret").notNull(),
+  webhookId: text("webhook_id"),
+  lastYmlSha: text("last_yml_sha"),
+  lastYmlProcessedAt: timestamp("last_yml_processed_at"),
+  isActive: boolean("is_active").default(true),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (t) => [unique("git_repos_workspace_path").on(t.workspaceId, t.repoPath)]);
+
+// ── Git Agent Runs (per-webhook execution records) ───────────────────────────
+export const gitAgentRuns = pgTable("git_agent_runs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  repoId: varchar("repo_id").notNull().references(() => gitRepos.id, { onDelete: "cascade" }),
+  gitAgentId: varchar("git_agent_id").references(() => gitAgents.id, { onDelete: "set null" }),
+  gitAgentSlug: text("git_agent_slug").notNull(),
+  taskId: varchar("task_id").references(() => tasks.id, { onDelete: "set null" }),
+  eventType: text("event_type").notNull(),
+  eventRef: text("event_ref"),
+  status: text("status").notNull().default("pending"),
+  skipReason: text("skip_reason"),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertGitAgentSchema = createInsertSchema(gitAgents).omit({ id: true, createdAt: true });
+export type GitAgent = typeof gitAgents.$inferSelect;
+export type InsertGitAgent = z.infer<typeof insertGitAgentSchema>;
+
+export const insertGitRepoSchema = createInsertSchema(gitRepos).omit({ id: true, createdAt: true, lastYmlProcessedAt: true });
+export type GitRepo = typeof gitRepos.$inferSelect;
+export type InsertGitRepo = z.infer<typeof insertGitRepoSchema>;
+
+export type GitAgentRun = typeof gitAgentRuns.$inferSelect;
+
+// ─── Global white-label settings (singleton row, id = "singleton") ────────────
+export const globalSettings = pgTable("global_settings", {
+  id: varchar("id").primaryKey().default("singleton"),
+  appName: text("app_name").notNull().default("NanoOrch"),
+  appLogoUrl: text("app_logo_url"),
+  faviconUrl: text("favicon_url"),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export type GlobalSettings = typeof globalSettings.$inferSelect;
+
+// ─── Provider keys (AI model credentials, global or per-workspace) ─────────────
+export const providerKeys = pgTable("provider_keys", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  workspaceId: varchar("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
+  provider: text("provider").notNull(),
+  encryptedKey: text("encrypted_key").notNull(),
+  baseUrl: text("base_url"),
+  label: text("label"),
+  updatedBy: varchar("updated_by").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export type ProviderKey = typeof providerKeys.$inferSelect;

@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Plus, Bot, Trash2, Edit, Brain, Thermometer, Wrench, ChevronDown, ChevronRight, Database, Cloud, Timer, GitBranch, Heart, Zap, Clock } from "lucide-react";
-import { SiJira, SiGithub, SiGitlab } from "react-icons/si";
+import { Plus, Bot, Trash2, Edit, Brain, Thermometer, Wrench, ChevronDown, ChevronRight, Database, Cloud, Timer, GitBranch, Heart, Zap, Clock, MessageSquare, Users, LayoutTemplate } from "lucide-react";
+import TemplateGalleryDialog, { type AgentTemplate } from "@/components/TemplateGalleryDialog";
+import { SiJira, SiGithub, SiGitlab, SiSlack } from "react-icons/si";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -30,6 +31,7 @@ interface AgentForm {
   maxTokens: number;
   temperature: number;
   memoryEnabled: boolean;
+  reactEnabled: boolean;
   tools: string[];
   sandboxTimeoutSeconds: number | null;
   heartbeatEnabled: boolean;
@@ -48,6 +50,7 @@ const defaultForm: AgentForm = {
   maxTokens: 4096,
   temperature: 70,
   memoryEnabled: false,
+  reactEnabled: false,
   tools: [],
   sandboxTimeoutSeconds: null,
   heartbeatEnabled: false,
@@ -96,11 +99,13 @@ const PROVIDER_TOOLS: Record<string, { name: string; label: string; description:
   jira: [
     { name: "jira_list_projects", label: "List Projects", description: "List all accessible Jira projects" },
     { name: "jira_search_issues", label: "Search Issues (JQL)", description: "Search issues using JQL" },
-    { name: "jira_get_issue", label: "Get Issue", description: "Get full details of a Jira issue" },
+    { name: "jira_get_issue", label: "Get Issue", description: "Get full details of a Jira issue including attachments list" },
     { name: "jira_create_issue", label: "Create Issue", description: "Create a Bug, Task, Story, or Epic" },
     { name: "jira_update_issue", label: "Update Issue", description: "Update summary, status, priority or assignee" },
     { name: "jira_add_comment", label: "Add Comment", description: "Add a comment to a Jira issue" },
     { name: "jira_list_sprints", label: "List Sprints", description: "List sprints for a board" },
+    { name: "jira_get_attachment", label: "Get Attachment", description: "Download attachment content by ID (text or base64 for binary files)" },
+    { name: "jira_upload_attachment", label: "Upload Attachment", description: "Upload a file (base64 or text) as an attachment to a Jira issue" },
   ],
   github: [
     { name: "github_list_repos", label: "List Repos", description: "List repositories for a user or org" },
@@ -121,6 +126,80 @@ const PROVIDER_TOOLS: Record<string, { name: string; label: string; description:
     { name: "gitlab_list_pipelines", label: "List Pipelines", description: "List CI/CD pipelines" },
     { name: "gitlab_trigger_pipeline", label: "Trigger Pipeline", description: "Trigger a CI/CD pipeline" },
   ],
+  teams: [
+    { name: "teams_send_message", label: "Send Message", description: "Send a message to a Teams channel or chat" },
+    { name: "teams_send_notification", label: "Send Notification", description: "Send a formatted notification card to Teams" },
+  ],
+  slack: [
+    { name: "slack_send_message", label: "Send Message", description: "Send a message to a Slack channel" },
+    { name: "slack_send_notification", label: "Send Notification", description: "Send a formatted notification to Slack" },
+  ],
+  google_chat: [
+    { name: "google_chat_send_message", label: "Send Message", description: "Send a plain text message to a Google Chat space" },
+    { name: "google_chat_send_card", label: "Send Card", description: "Send a rich card message to Google Chat" },
+  ],
+  servicenow: [
+    { name: "servicenow_search_records", label: "Search Records", description: "Search ServiceNow records by table and query" },
+    { name: "servicenow_get_incident", label: "Get Incident", description: "Get full details of a ServiceNow incident" },
+    { name: "servicenow_create_incident", label: "Create Incident", description: "Create a new ServiceNow incident" },
+    { name: "servicenow_update_record", label: "Update Record", description: "Update a ServiceNow record by sys_id" },
+    { name: "servicenow_add_work_note", label: "Add Work Note", description: "Add a work note to an incident or record" },
+    { name: "servicenow_get_ritm", label: "Get RITM", description: "Get a Requested Item (RITM) from a service request" },
+    { name: "servicenow_create_ritm", label: "Create RITM", description: "Create a new Requested Item" },
+    { name: "servicenow_create_change_request", label: "Create Change Request", description: "Create a new change request" },
+    { name: "servicenow_get_catalog_items", label: "Get Catalog Items", description: "List items from the service catalog" },
+  ],
+  postgresql: [
+    // Query & Read
+    { name: "pg_list_schemas", label: "List Schemas", description: "List all non-system schemas in the database" },
+    { name: "pg_list_tables", label: "List Tables", description: "List tables with type and estimated row count" },
+    { name: "pg_describe_table", label: "Describe Table", description: "Show columns, types, nullability, and primary keys" },
+    { name: "pg_query", label: "Run Query", description: "Execute a read-only SELECT or WITH statement" },
+    { name: "pg_query_page", label: "Paginated Query", description: "Run a paginated SELECT with total row count and hasMore flag" },
+    { name: "pg_explain", label: "Explain Query", description: "Return the query execution plan without running the query" },
+    { name: "pg_explain_analyze", label: "Explain Analyze", description: "Run a query and return execution plan with actual runtimes" },
+    // Schema & Metadata
+    { name: "pg_list_indexes", label: "List Indexes", description: "List all indexes including uniqueness and primary key status" },
+    { name: "pg_list_views", label: "List Views", description: "List all views and materialized views" },
+    { name: "pg_list_functions", label: "List Functions", description: "List stored functions and procedures with signatures" },
+    { name: "pg_list_triggers", label: "List Triggers", description: "List all triggers with event type and timing" },
+    { name: "pg_list_constraints", label: "List Constraints", description: "List PK, FK, UNIQUE, CHECK constraints with relationships" },
+    { name: "pg_list_extensions", label: "List Extensions", description: "List installed PostgreSQL extensions" },
+    { name: "pg_column_stats", label: "Column Statistics", description: "Show per-column statistics from pg_stats" },
+    // DBA Monitoring
+    { name: "pg_active_connections", label: "Active Connections", description: "List active database connections and their current queries" },
+    { name: "pg_long_queries", label: "Long Running Queries", description: "List queries running longer than a threshold" },
+    { name: "pg_list_locks", label: "List Locks", description: "Show current database locks and which queries hold them" },
+    { name: "pg_blocking_queries", label: "Blocking Queries", description: "Show which queries are blocking others" },
+    { name: "pg_table_sizes", label: "Table Sizes", description: "Show disk size for all tables sorted by total size" },
+    { name: "pg_database_size", label: "Database Size", description: "Return the total disk size of the current database" },
+    { name: "pg_table_health", label: "Table Health", description: "Show live/dead row counts and last vacuum timestamps" },
+    { name: "pg_index_usage", label: "Index Usage", description: "Show index scan counts to find unused indexes" },
+    { name: "pg_slow_queries", label: "Slow Queries", description: "Top slowest queries by mean execution time (requires pg_stat_statements)" },
+    { name: "pg_replication_lag", label: "Replication Lag", description: "Show replication lag for all connected standby replicas" },
+    // Write / DDL (approval-gated)
+    { name: "pg_execute", label: "Execute SQL", description: "Execute a write SQL statement — requires approval" },
+    { name: "pg_upsert", label: "Upsert Row", description: "Insert or update a row on conflict — requires approval" },
+    { name: "pg_bulk_insert", label: "Bulk Insert", description: "Insert up to 1000 rows from a JSON array — requires approval" },
+    { name: "pg_call_procedure", label: "Call Procedure", description: "Call a stored procedure with arguments — requires approval" },
+    { name: "pg_truncate", label: "Truncate Table", description: "Remove all rows from a table — requires approval" },
+    { name: "pg_create_table", label: "Create Table", description: "Create a new table from column definitions — requires approval" },
+    { name: "pg_drop_table", label: "Drop Table", description: "Permanently drop a table — requires approval" },
+    { name: "pg_alter_table", label: "Alter Table", description: "Add/drop/rename columns, set defaults — requires approval" },
+    { name: "pg_create_index", label: "Create Index", description: "Create an index on a table — requires approval" },
+    { name: "pg_drop_index", label: "Drop Index", description: "Drop an index — requires approval" },
+    { name: "pg_refresh_matview", label: "Refresh Materialized View", description: "Refresh a materialized view — requires approval" },
+    { name: "pg_transaction", label: "Transaction", description: "Run multiple statements atomically — requires approval" },
+    { name: "pg_terminate_connection", label: "Terminate Connection", description: "Kill a database connection by PID — requires approval" },
+    { name: "pg_vacuum", label: "Vacuum Table", description: "Reclaim dead tuple space with VACUUM ANALYZE — requires approval" },
+    // Advanced
+    { name: "pg_vector_search", label: "Vector Search", description: "Nearest-neighbour search using pgvector embeddings" },
+    { name: "pg_fulltext_search", label: "Full-Text Search", description: "Search text or tsvector columns using PostgreSQL FTS" },
+    { name: "pg_notify", label: "Notify Channel", description: "Send a NOTIFY event to a PostgreSQL pub/sub channel" },
+    { name: "pg_list_partitions", label: "List Partitions", description: "List child partitions of a partitioned table" },
+    { name: "pg_list_policies", label: "List RLS Policies", description: "List Row Level Security policies on tables" },
+    { name: "pg_list_replication_slots", label: "List Replication Slots", description: "List logical and physical replication slots with lag" },
+  ],
 };
 
 const PROVIDER_ICONS: Record<string, { icon: any; color: string; bg: string }> = {
@@ -131,6 +210,12 @@ const PROVIDER_ICONS: Record<string, { icon: any; color: string; bg: string }> =
   jira: { icon: SiJira, color: "text-blue-600", bg: "bg-blue-600/10" },
   github: { icon: SiGithub, color: "text-gray-300", bg: "bg-gray-500/10" },
   gitlab: { icon: SiGitlab, color: "text-orange-400", bg: "bg-orange-400/10" },
+  teams: { icon: Users, color: "text-purple-400", bg: "bg-purple-500/10" },
+  slack: { icon: SiSlack, color: "text-green-400", bg: "bg-green-500/10" },
+  google_chat: { icon: MessageSquare, color: "text-blue-400", bg: "bg-blue-500/10" },
+  servicenow: { icon: Wrench, color: "text-emerald-400", bg: "bg-emerald-500/10" },
+  postgresql: { icon: Database, color: "text-cyan-400", bg: "bg-cyan-500/10" },
+  kubernetes: { icon: Cloud, color: "text-blue-400", bg: "bg-blue-500/10" },
 };
 
 function ToolsPicker({ workspaceId, selected, onChange }: {
@@ -188,7 +273,7 @@ function ToolsPicker({ workspaceId, selected, onChange }: {
                   <Icon className={`w-3.5 h-3.5 ${providerMeta.color}`} />
                 </div>
                 <span className="text-sm font-medium">{ci.name}</span>
-                <Badge variant="outline" className="text-xs capitalize px-1.5 py-0">{ci.provider}</Badge>
+                <Badge variant="outline" className="text-xs px-1.5 py-0">{{ aws: "AWS", gcp: "GCP", azure: "Azure", ragflow: "RAGFlow", jira: "Jira", github: "GitHub", gitlab: "GitLab", teams: "MS Teams", slack: "Slack", google_chat: "Google Chat", servicenow: "ServiceNow", postgresql: "PostgreSQL", kubernetes: "Kubernetes" }[ci.provider] ?? ci.provider}</Badge>
               </div>
               <div className="flex items-center gap-2">
                 {enabledCount > 0 && (
@@ -230,6 +315,8 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
   const [open, setOpen] = useState(false);
   const [editAgent, setEditAgent] = useState<Agent | null>(null);
   const [form, setForm] = useState<AgentForm>(defaultForm);
+  const [templateGalleryOpen, setTemplateGalleryOpen] = useState(false);
+  const [appliedTemplate, setAppliedTemplate] = useState<string | null>(null);
 
   const { data: agents, isLoading } = useQuery<Agent[]>({
     queryKey: [`/api/orchestrators/${orchestratorId}/agents`],
@@ -283,6 +370,22 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
   const openCreate = () => {
     setEditAgent(null);
     setForm(defaultForm);
+    setAppliedTemplate(null);
+    setOpen(true);
+  };
+
+  const handleTemplateSelect = (template: AgentTemplate) => {
+    setEditAgent(null);
+    setAppliedTemplate(template.name);
+    setForm({
+      ...defaultForm,
+      name: template.name,
+      description: template.description,
+      instructions: template.systemPrompt,
+      tools: template.tools,
+      temperature: template.defaultTemperature,
+      maxTokens: template.defaultMaxTokens,
+    });
     setOpen(true);
   };
 
@@ -295,6 +398,7 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
       maxTokens: agent.maxTokens ?? 4096,
       temperature: agent.temperature ?? 70,
       memoryEnabled: agent.memoryEnabled ?? false,
+      reactEnabled: agent.reactEnabled ?? false,
       tools: Array.isArray(agent.tools) ? (agent.tools as string[]) : [],
       sandboxTimeoutSeconds: agent.sandboxTimeoutSeconds ?? null,
       heartbeatEnabled: agent.heartbeatEnabled ?? false,
@@ -334,9 +438,14 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
           <h1 className="text-2xl font-bold">Agents</h1>
           <p className="text-muted-foreground mt-1">AI agents within this orchestrator</p>
         </div>
-        <Button onClick={openCreate} data-testid="button-new-agent">
-          <Plus className="w-4 h-4 mr-2" /> New Agent
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => setTemplateGalleryOpen(true)} data-testid="button-from-template">
+            <LayoutTemplate className="w-4 h-4 mr-2" /> From Template
+          </Button>
+          <Button onClick={openCreate} data-testid="button-new-agent">
+            <Plus className="w-4 h-4 mr-2" /> New Agent
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -348,10 +457,15 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
           <CardContent className="py-16 text-center">
             <Bot className="w-12 h-12 mx-auto text-muted-foreground mb-3" />
             <h3 className="font-semibold mb-2">No agents yet</h3>
-            <p className="text-muted-foreground mb-4">Create your first agent for this orchestrator</p>
-            <Button onClick={openCreate} data-testid="button-create-first-agent">
-              <Plus className="w-4 h-4 mr-2" /> Create Agent
-            </Button>
+            <p className="text-muted-foreground mb-4">Start from a template or build from scratch</p>
+            <div className="flex items-center justify-center gap-2">
+              <Button variant="outline" onClick={() => setTemplateGalleryOpen(true)} data-testid="button-template-empty-state">
+                <LayoutTemplate className="w-4 h-4 mr-2" /> From Template
+              </Button>
+              <Button onClick={openCreate} data-testid="button-create-first-agent">
+                <Plus className="w-4 h-4 mr-2" /> Create Agent
+              </Button>
+            </div>
           </CardContent>
         </Card>
       ) : (
@@ -404,6 +518,11 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
                         <Brain className="w-3 h-3" /> Memory
                       </Badge>
                     )}
+                    {agent.reactEnabled && (
+                      <Badge className="text-xs bg-yellow-500/20 text-yellow-400 border-yellow-500/30 gap-1">
+                        <Zap className="w-3 h-3" /> ReAct
+                      </Badge>
+                    )}
                     {toolCount > 0 && (
                       <Badge className="text-xs bg-violet-500/20 text-violet-400 border-violet-500/30 gap-1"
                         data-testid={`badge-tools-${agent.id}`}>
@@ -442,6 +561,20 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
           <DialogHeader>
             <DialogTitle>{editAgent ? "Edit Agent" : "Create Agent"}</DialogTitle>
           </DialogHeader>
+          {appliedTemplate && !editAgent && (
+            <div className="flex items-center gap-2 text-xs rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
+              <LayoutTemplate className="w-3.5 h-3.5 text-primary shrink-0" />
+              <span className="text-primary font-medium">Based on template:</span>
+              <span className="text-muted-foreground">{appliedTemplate}</span>
+              <button
+                onClick={() => { setAppliedTemplate(null); setForm(defaultForm); }}
+                className="ml-auto text-muted-foreground hover:text-foreground"
+                title="Clear template"
+              >
+                ×
+              </button>
+            </div>
+          )}
           <div className="space-y-4 py-2">
             <div>
               <Label>Name</Label>
@@ -476,7 +609,15 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
                 id="memory-switch" data-testid="switch-memory" />
               <Label htmlFor="memory-switch" className="cursor-pointer">
                 <span className="flex items-center gap-1.5"><Brain className="w-4 h-4" /> Enable Memory</span>
-                <span className="text-xs text-muted-foreground">Agent retains context between tasks</span>
+                <span className="text-xs text-muted-foreground">Agent retains context between tasks and chat</span>
+              </Label>
+            </div>
+            <div className="flex items-center gap-3">
+              <Switch checked={form.reactEnabled} onCheckedChange={(v) => setForm({ ...form, reactEnabled: v })}
+                id="react-switch" data-testid="switch-react" />
+              <Label htmlFor="react-switch" className="cursor-pointer">
+                <span className="flex items-center gap-1.5"><Zap className="w-4 h-4" /> Enable ReAct Mode</span>
+                <span className="text-xs text-muted-foreground">Agent reasons explicitly before every action (Thought → Act → Observe)</span>
               </Label>
             </div>
             <div>
@@ -648,6 +789,12 @@ export default function AgentsPage({ orchestratorId, workspaceId }: Props) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <TemplateGalleryDialog
+        open={templateGalleryOpen}
+        onClose={() => setTemplateGalleryOpen(false)}
+        onSelect={handleTemplateSelect}
+      />
     </div>
   );
 }

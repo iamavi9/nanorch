@@ -280,6 +280,32 @@ export const JIRA_TOOLS: ToolDefinition[] = [
       required: ["boardId"],
     },
   },
+  {
+    name: "jira_get_attachment",
+    description: "Download the content of a JIRA issue attachment by its ID. Returns plain text for text-based files (txt, csv, json, xml, log) or base64-encoded content for binary files (images, PDFs). Get attachment IDs from jira_get_issue.",
+    parameters: {
+      type: "object",
+      properties: {
+        attachmentId: { type: "string", description: "Attachment ID from the attachments list returned by jira_get_issue" },
+      },
+      required: ["attachmentId"],
+    },
+  },
+  {
+    name: "jira_upload_attachment",
+    description: "Upload a file as an attachment to a JIRA issue. Use base64 content from jira_get_attachment to copy attachments between issues. Requires Create Attachments permission on the target issue.",
+    parameters: {
+      type: "object",
+      properties: {
+        issueKey: { type: "string", description: "JIRA issue key to attach the file to, e.g. SUPPORT-55" },
+        filename: { type: "string", description: "Filename including extension, e.g. screenshot.png or error-log.txt" },
+        content: { type: "string", description: "Base64-encoded file content (from jira_get_attachment encoding: base64) or plain text content for text files" },
+        mimeType: { type: "string", description: "MIME type of the file, e.g. image/png, text/plain, application/pdf. Defaults to application/octet-stream if omitted." },
+        encoding: { type: "string", description: "Content encoding: 'base64' for binary files, 'text' for plain text files (from jira_get_attachment)", enum: ["base64", "text"] },
+      },
+      required: ["issueKey", "filename", "content"],
+    },
+  },
 ];
 
 export const GITHUB_TOOLS: ToolDefinition[] = [
@@ -710,6 +736,534 @@ export const SERVICENOW_TOOLS: ToolDefinition[] = [
   },
 ];
 
+const PG_APPROVAL_NOTE =
+  "IMPORTANT: You MUST call request_approval before using this tool — this operation modifies or drops data and requires human approval.";
+
+export const POSTGRESQL_TOOLS: ToolDefinition[] = [
+  // ── Original 5 tools ──────────────────────────────────────────────────────
+  {
+    name: "pg_list_schemas",
+    description: "List all non-system schemas in the connected PostgreSQL database.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "pg_list_tables",
+    description: "List all tables (with type and estimated row count) in a PostgreSQL schema.",
+    parameters: {
+      type: "object",
+      properties: {
+        schema: { type: "string", description: "Schema name (default: public)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "pg_describe_table",
+    description: "Show columns, data types, nullability, defaults, and primary key flags for a PostgreSQL table.",
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "Table name" },
+        schema: { type: "string", description: "Schema name (default: public)" },
+      },
+      required: ["table"],
+    },
+  },
+  {
+    name: "pg_query",
+    description: "Run a read-only SQL query (SELECT, WITH, EXPLAIN, SHOW) against the connected PostgreSQL database. Non-read statements are rejected automatically.",
+    parameters: {
+      type: "object",
+      properties: {
+        sql: { type: "string", description: "The SELECT / WITH / EXPLAIN / SHOW statement to execute" },
+        limit: { type: "string", description: "Maximum rows to return (default 100, max 500)" },
+      },
+      required: ["sql"],
+    },
+  },
+  {
+    name: "pg_execute",
+    description:
+      "Execute a write SQL statement (INSERT, UPDATE, DELETE, TRUNCATE, DDL) against the connected PostgreSQL database. " +
+      "IMPORTANT: You MUST call request_approval before using this tool — write operations require human approval from all sources " +
+      "(chat, scheduled jobs, triggers, tasks, and two-way comms channels). " +
+      "Returns rows affected and (for INSERT) the inserted rows.",
+    parameters: {
+      type: "object",
+      properties: {
+        sql: { type: "string", description: "The write SQL statement to execute (INSERT, UPDATE, DELETE, TRUNCATE, or DDL)" },
+      },
+      required: ["sql"],
+    },
+  },
+
+  // ── Phase 1: Query Enhancements ───────────────────────────────────────────
+  {
+    name: "pg_query_page",
+    description: "Run a paginated read-only SELECT or WITH query. Returns rows for the requested page along with total row count and hasMore flag. Do NOT include LIMIT/OFFSET in the SQL — use the limit and offset parameters instead.",
+    parameters: {
+      type: "object",
+      properties: {
+        sql: { type: "string", description: "The base SELECT or WITH statement (without LIMIT or OFFSET)" },
+        limit: { type: "string", description: "Rows per page (default 100, max 1000)" },
+        offset: { type: "string", description: "Number of rows to skip (default 0)" },
+      },
+      required: ["sql"],
+    },
+  },
+  {
+    name: "pg_explain",
+    description: "Return the query execution plan (EXPLAIN FORMAT JSON) for a SELECT or WITH statement without executing it. Use to diagnose slow queries and missing indexes.",
+    parameters: {
+      type: "object",
+      properties: {
+        sql: { type: "string", description: "The SELECT or WITH statement to explain (not executed)" },
+      },
+      required: ["sql"],
+    },
+  },
+  {
+    name: "pg_explain_analyze",
+    description: "Return the query execution plan with actual runtime statistics (EXPLAIN ANALYZE BUFFERS FORMAT JSON). Executes the query — only use with SELECT or WITH statements.",
+    parameters: {
+      type: "object",
+      properties: {
+        sql: { type: "string", description: "The SELECT or WITH statement to explain and execute" },
+      },
+      required: ["sql"],
+    },
+  },
+  {
+    name: "pg_call_procedure",
+    description:
+      "Call a stored procedure or function via CALL. " + PG_APPROVAL_NOTE,
+    parameters: {
+      type: "object",
+      properties: {
+        procedure: { type: "string", description: "Procedure name, optionally schema-qualified (e.g. 'public.my_proc')" },
+        args: { type: "string", description: "JSON array of argument values to pass to the procedure (e.g. '[1, \"hello\"]')" },
+      },
+      required: ["procedure"],
+    },
+  },
+
+  // ── Phase 2: Schema & Metadata Exploration ────────────────────────────────
+  {
+    name: "pg_list_indexes",
+    description: "List all indexes in a schema, including uniqueness, primary key status, and index definition. Optionally filter by table.",
+    parameters: {
+      type: "object",
+      properties: {
+        schema: { type: "string", description: "Schema name (default: public)" },
+        table: { type: "string", description: "Optional: filter indexes to this table only" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "pg_list_views",
+    description: "List all views and materialized views in a PostgreSQL schema.",
+    parameters: {
+      type: "object",
+      properties: {
+        schema: { type: "string", description: "Schema name (default: public)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "pg_list_functions",
+    description: "List all stored functions and procedures in a PostgreSQL schema with their return types and parameter signatures.",
+    parameters: {
+      type: "object",
+      properties: {
+        schema: { type: "string", description: "Schema name (default: public)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "pg_list_triggers",
+    description: "List all triggers in a schema, showing event type, timing, and associated table. Optionally filter by table.",
+    parameters: {
+      type: "object",
+      properties: {
+        schema: { type: "string", description: "Schema name (default: public)" },
+        table: { type: "string", description: "Optional: filter triggers to this table only" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "pg_list_constraints",
+    description: "List all table constraints (PRIMARY KEY, FOREIGN KEY, UNIQUE, CHECK) in a schema with foreign key relationships. Optionally filter by table.",
+    parameters: {
+      type: "object",
+      properties: {
+        schema: { type: "string", description: "Schema name (default: public)" },
+        table: { type: "string", description: "Optional: filter constraints to this table only" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "pg_list_extensions",
+    description: "List all PostgreSQL extensions installed in the database (e.g. pgvector, postgis, pg_stat_statements).",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "pg_column_stats",
+    description: "Show per-column statistics from pg_stats (null fraction, distinct values, most common values, correlation). Requires ANALYZE to have been run on the table.",
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "Table name" },
+        schema: { type: "string", description: "Schema name (default: public)" },
+      },
+      required: ["table"],
+    },
+  },
+
+  // ── Phase 3: DBA Monitoring ───────────────────────────────────────────────
+  {
+    name: "pg_active_connections",
+    description: "List all active database connections with username, state, wait event, duration, and current query. Excludes the tool's own connection.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "pg_long_queries",
+    description: "List queries that have been running longer than a specified duration threshold. Useful for identifying stuck or slow queries.",
+    parameters: {
+      type: "object",
+      properties: {
+        min_duration_seconds: { type: "string", description: "Minimum duration in seconds to report (default: 30)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "pg_list_locks",
+    description: "List all current database locks, showing lock type, mode, granted status, and the query holding each lock.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "pg_blocking_queries",
+    description: "Show queries that are blocking other queries, including the blocking PID, user, query text, and how long the blocked query has been waiting.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "pg_table_sizes",
+    description: "Show disk size (table data + indexes + total) for all tables in a schema, sorted by total size descending.",
+    parameters: {
+      type: "object",
+      properties: {
+        schema: { type: "string", description: "Schema name (default: public)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "pg_database_size",
+    description: "Return the total disk size of the current PostgreSQL database.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "pg_table_health",
+    description: "Show live/dead row counts, dead row percentage, last vacuum/analyze timestamps, and seq/index scan counts for all tables in a schema. Use to identify tables needing VACUUM.",
+    parameters: {
+      type: "object",
+      properties: {
+        schema: { type: "string", description: "Schema name (default: public)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "pg_index_usage",
+    description: "Show scan counts, tuples read, and size for all indexes in a schema sorted by least used first. Use to identify unused indexes that waste disk space.",
+    parameters: {
+      type: "object",
+      properties: {
+        schema: { type: "string", description: "Schema name (default: public)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "pg_slow_queries",
+    description: "Return the top slowest queries by mean execution time from pg_stat_statements. Requires the pg_stat_statements extension to be installed and enabled.",
+    parameters: {
+      type: "object",
+      properties: {
+        limit: { type: "string", description: "Number of queries to return (default 20, max 100)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "pg_replication_lag",
+    description: "Show replication lag (write/flush/replay lag) for all connected standby replicas. Returns empty if no replication is configured.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "pg_terminate_connection",
+    description: "Terminate an active database connection by PID. " + PG_APPROVAL_NOTE,
+    parameters: {
+      type: "object",
+      properties: {
+        pid: { type: "string", description: "Process ID of the connection to terminate (from pg_active_connections)" },
+      },
+      required: ["pid"],
+    },
+  },
+  {
+    name: "pg_vacuum",
+    description: "Run VACUUM (and optionally ANALYZE) on a table to reclaim dead tuple space. " + PG_APPROVAL_NOTE,
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "Table name to vacuum" },
+        schema: { type: "string", description: "Schema name (default: public)" },
+        analyze: { type: "string", description: "Also run ANALYZE to update statistics? 'true' (default) or 'false'" },
+      },
+      required: ["table"],
+    },
+  },
+
+  // ── Phase 4: DDL / Write Operations ──────────────────────────────────────
+  {
+    name: "pg_upsert",
+    description: "Insert a single row or update it on conflict (INSERT … ON CONFLICT). " + PG_APPROVAL_NOTE,
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "Target table name" },
+        schema: { type: "string", description: "Schema name (default: public)" },
+        data: { type: "string", description: "JSON object mapping column names to values (e.g. '{\"id\":1,\"name\":\"Alice\"}')" },
+        conflict_columns: { type: "string", description: "Comma-separated column names that form the unique conflict key (e.g. 'id' or 'email,tenant_id')" },
+      },
+      required: ["table", "data", "conflict_columns"],
+    },
+  },
+  {
+    name: "pg_bulk_insert",
+    description: "Insert multiple rows from a JSON array in a single statement (max 1000 rows per call). " + PG_APPROVAL_NOTE,
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "Target table name" },
+        schema: { type: "string", description: "Schema name (default: public)" },
+        rows: { type: "string", description: "JSON array of objects where each object maps column names to values (e.g. '[{\"name\":\"Alice\"},{\"name\":\"Bob\"}]')" },
+      },
+      required: ["table", "rows"],
+    },
+  },
+  {
+    name: "pg_truncate",
+    description: "Remove all rows from a table (TRUNCATE). Much faster than DELETE for large tables but cannot be filtered. " + PG_APPROVAL_NOTE,
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "Table name to truncate" },
+        schema: { type: "string", description: "Schema name (default: public)" },
+        restart_identity: { type: "string", description: "Reset sequences? 'true' or 'false' (default: false)" },
+        cascade: { type: "string", description: "Also truncate tables with foreign key references? 'true' or 'false' (default: false)" },
+      },
+      required: ["table"],
+    },
+  },
+  {
+    name: "pg_create_table",
+    description: "Create a new table from a JSON column definition. " + PG_APPROVAL_NOTE,
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "New table name" },
+        schema: { type: "string", description: "Schema name (default: public)" },
+        columns: {
+          type: "string",
+          description: "JSON array of column definitions. Each object: {name, type, nullable?, default?, primaryKey?}. Example: '[{\"name\":\"id\",\"type\":\"serial\",\"primaryKey\":true},{\"name\":\"email\",\"type\":\"text\",\"nullable\":false}]'",
+        },
+        if_not_exists: { type: "string", description: "Use IF NOT EXISTS? 'true' (default) or 'false'" },
+      },
+      required: ["table", "columns"],
+    },
+  },
+  {
+    name: "pg_drop_table",
+    description: "Drop a table permanently. This is irreversible. " + PG_APPROVAL_NOTE,
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "Table name to drop" },
+        schema: { type: "string", description: "Schema name (default: public)" },
+        if_exists: { type: "string", description: "Use IF EXISTS? 'true' (default) or 'false'" },
+        cascade: { type: "string", description: "Also drop dependent objects? 'true' or 'false' (default: false)" },
+      },
+      required: ["table"],
+    },
+  },
+  {
+    name: "pg_alter_table",
+    description: "Alter a table structure: add/drop/rename columns, rename the table, set/drop column defaults, or set/drop NOT NULL. " + PG_APPROVAL_NOTE,
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "Table name to alter" },
+        schema: { type: "string", description: "Schema name (default: public)" },
+        operation: {
+          type: "string",
+          description: "Operation to perform: add_column | drop_column | rename_column | rename_table | set_column_default | drop_column_default | set_not_null | drop_not_null",
+        },
+        column: { type: "string", description: "Column name (required for column operations)" },
+        type: { type: "string", description: "Column data type (required for add_column, e.g. 'text', 'integer', 'timestamptz')" },
+        new_name: { type: "string", description: "New name (required for rename_column and rename_table)" },
+        default: { type: "string", description: "Default expression (required for set_column_default, e.g. 'now()' or \"'active'\")" },
+        nullable: { type: "string", description: "Allow nulls? 'true' or 'false' (used for add_column)" },
+        cascade: { type: "string", description: "Drop dependent objects? 'true' or 'false' (used for drop_column)" },
+      },
+      required: ["table", "operation"],
+    },
+  },
+  {
+    name: "pg_create_index",
+    description: "Create an index on a table. Uses CONCURRENTLY by default to avoid locking. " + PG_APPROVAL_NOTE,
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "Table name" },
+        schema: { type: "string", description: "Schema name (default: public)" },
+        columns: { type: "string", description: "Comma-separated column names to index (e.g. 'email' or 'last_name, first_name')" },
+        index_name: { type: "string", description: "Optional custom index name (auto-generated if omitted)" },
+        unique: { type: "string", description: "Create a UNIQUE index? 'true' or 'false' (default: false)" },
+        method: { type: "string", description: "Index method: btree (default), hash, gin, gist, spgist, brin" },
+        concurrently: { type: "string", description: "Build index without locking writes? 'true' (default) or 'false'" },
+        if_not_exists: { type: "string", description: "Use IF NOT EXISTS? 'true' (default) or 'false'" },
+      },
+      required: ["table", "columns"],
+    },
+  },
+  {
+    name: "pg_drop_index",
+    description: "Drop an index. Uses CONCURRENTLY by default to avoid locking. " + PG_APPROVAL_NOTE,
+    parameters: {
+      type: "object",
+      properties: {
+        index_name: { type: "string", description: "Index name to drop" },
+        schema: { type: "string", description: "Optional schema name to qualify the index" },
+        if_exists: { type: "string", description: "Use IF EXISTS? 'true' (default) or 'false'" },
+        concurrently: { type: "string", description: "Drop without locking? 'true' (default) or 'false'" },
+        cascade: { type: "string", description: "Drop dependent objects? 'true' or 'false' (default: false)" },
+      },
+      required: ["index_name"],
+    },
+  },
+  {
+    name: "pg_refresh_matview",
+    description: "Refresh a materialized view to update its data. " + PG_APPROVAL_NOTE,
+    parameters: {
+      type: "object",
+      properties: {
+        view: { type: "string", description: "Materialized view name" },
+        schema: { type: "string", description: "Schema name (default: public)" },
+        concurrently: { type: "string", description: "Refresh without locking reads? 'true' or 'false' (default: false — requires a unique index on the matview)" },
+      },
+      required: ["view"],
+    },
+  },
+  {
+    name: "pg_transaction",
+    description:
+      "Execute multiple SQL statements as an atomic transaction. All succeed or all roll back on failure. Returns per-statement results on commit, or the error and rollback info on failure. " +
+      PG_APPROVAL_NOTE,
+    parameters: {
+      type: "object",
+      properties: {
+        statements: {
+          type: "string",
+          description: "JSON array of SQL strings to execute in order (max 50). Example: '[\"UPDATE orders SET status='done' WHERE id=1\", \"INSERT INTO audit_log VALUES (1,'closed')\"]'",
+        },
+      },
+      required: ["statements"],
+    },
+  },
+
+  // ── Phase 5: Advanced Features ────────────────────────────────────────────
+  {
+    name: "pg_vector_search",
+    description: "Perform vector similarity search using pgvector. Requires the pgvector extension and a vector column. Returns nearest neighbours sorted by distance.",
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "Table name containing the vector column" },
+        schema: { type: "string", description: "Schema name (default: public)" },
+        column: { type: "string", description: "Name of the vector column (type: vector)" },
+        query_vector: { type: "string", description: "JSON array of floats representing the query embedding (e.g. '[0.1, 0.2, ...]')" },
+        limit: { type: "string", description: "Number of nearest neighbours to return (default 10, max 100)" },
+        operator: { type: "string", description: "Distance metric: cosine (default, <=>), l2 (<->), or inner_product (<#>)" },
+      },
+      required: ["table", "column", "query_vector"],
+    },
+  },
+  {
+    name: "pg_fulltext_search",
+    description: "Search text or tsvector columns using PostgreSQL full-text search (plainto_tsquery). Works on both tsvector columns and plain text columns.",
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "Table name to search" },
+        schema: { type: "string", description: "Schema name (default: public)" },
+        column: { type: "string", description: "Column name to search (tsvector or text type)" },
+        query: { type: "string", description: "Natural language search query (e.g. 'invoice payment failed')" },
+        limit: { type: "string", description: "Max results to return (default 20, max 500)" },
+        language: { type: "string", description: "Text search language (default: english)" },
+      },
+      required: ["table", "column", "query"],
+    },
+  },
+  {
+    name: "pg_notify",
+    description: "Send a NOTIFY event to a PostgreSQL listen/notify channel. Useful for triggering downstream listeners or pub/sub workflows.",
+    parameters: {
+      type: "object",
+      properties: {
+        channel: { type: "string", description: "Channel name to notify" },
+        payload: { type: "string", description: "Optional payload string to include with the notification" },
+      },
+      required: ["channel"],
+    },
+  },
+  {
+    name: "pg_list_partitions",
+    description: "List all child partitions of a partitioned table, including partition bounds and size.",
+    parameters: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "Parent partitioned table name" },
+        schema: { type: "string", description: "Schema name (default: public)" },
+      },
+      required: ["table"],
+    },
+  },
+  {
+    name: "pg_list_policies",
+    description: "List all Row Level Security (RLS) policies on tables in a schema. Shows roles, command scope, USING expression, and WITH CHECK expression.",
+    parameters: {
+      type: "object",
+      properties: {
+        schema: { type: "string", description: "Schema name (default: public)" },
+        table: { type: "string", description: "Optional: filter to a specific table" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "pg_list_replication_slots",
+    description: "List all logical and physical replication slots with their lag size, active status, and LSN positions.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+];
+
 export const ALL_TOOLS: Record<string, ToolDefinition[]> = {
   aws: AWS_TOOLS,
   gcp: GCP_TOOLS,
@@ -722,10 +1276,70 @@ export const ALL_TOOLS: Record<string, ToolDefinition[]> = {
   slack: SLACK_TOOLS,
   google_chat: GOOGLE_CHAT_TOOLS,
   servicenow: SERVICENOW_TOOLS,
+  postgresql: POSTGRESQL_TOOLS,
 };
 
-export function getToolsForProvider(cloudProvider: "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "slack" | "google_chat" | "servicenow"): ToolDefinition[] {
-  return ALL_TOOLS[cloudProvider] ?? [];
+export const KUBERNETES_TOOLS: ToolDefinition[] = [
+  // ── Cluster ─────────────────────────────────────────────────────────────────
+  { name: "kube_get_cluster_info", description: "Get Kubernetes cluster version and available API groups", parameters: { type: "object", properties: {} } },
+  { name: "kube_list_nodes", description: "List all cluster nodes with status, roles, CPU/memory capacity, and kubelet version", parameters: { type: "object", properties: {} } },
+  { name: "kube_list_namespaces", description: "List all namespaces in the cluster", parameters: { type: "object", properties: {} } },
+  { name: "kube_list_api_resources", description: "List available Kubernetes API resource types in the core API group", parameters: { type: "object", properties: {} } },
+  { name: "kube_list_events", description: "List recent Kubernetes events in a namespace", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace (uses default if omitted)" }, allNamespaces: { type: "string", description: "Set to 'true' to list events across all namespaces" } } } },
+  // ── Workloads ────────────────────────────────────────────────────────────────
+  { name: "kube_list_pods", description: "List pods with status, readiness, restarts, and node assignment", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace (uses default if omitted)" }, labelSelector: { type: "string", description: "Label selector filter, e.g. app=nginx" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+  { name: "kube_get_pod", description: "Get details of a specific pod including containers, conditions, and status", parameters: { type: "object", properties: { name: { type: "string", description: "Pod name" }, namespace: { type: "string", description: "Namespace" } }, required: ["name"] } },
+  { name: "kube_get_pod_logs", description: "Retrieve recent log output from a pod container", parameters: { type: "object", properties: { name: { type: "string", description: "Pod name" }, namespace: { type: "string", description: "Namespace" }, container: { type: "string", description: "Container name (uses first container if omitted)" }, tailLines: { type: "string", description: "Number of log lines to return (default 100)" } }, required: ["name"] } },
+  { name: "kube_delete_pod", description: "Delete a pod — it will be recreated by its controller", parameters: { type: "object", properties: { name: { type: "string", description: "Pod name" }, namespace: { type: "string", description: "Namespace" } }, required: ["name"] } },
+  { name: "kube_list_deployments", description: "List deployments with desired/ready/available replica counts and image", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+  { name: "kube_get_deployment", description: "Get details of a specific deployment including strategy and conditions", parameters: { type: "object", properties: { name: { type: "string", description: "Deployment name" }, namespace: { type: "string", description: "Namespace" } }, required: ["name"] } },
+  { name: "kube_scale_deployment", description: "Scale a deployment to a specific number of replicas", parameters: { type: "object", properties: { name: { type: "string", description: "Deployment name" }, namespace: { type: "string", description: "Namespace" }, replicas: { type: "string", description: "Desired replica count (non-negative integer)" } }, required: ["name", "replicas"] } },
+  { name: "kube_rollout_restart", description: "Trigger a rolling restart of a deployment by updating its restartedAt annotation", parameters: { type: "object", properties: { name: { type: "string", description: "Deployment name" }, namespace: { type: "string", description: "Namespace" } }, required: ["name"] } },
+  { name: "kube_rollout_status", description: "Check rollout status and replica conditions of a deployment", parameters: { type: "object", properties: { name: { type: "string", description: "Deployment name" }, namespace: { type: "string", description: "Namespace" } }, required: ["name"] } },
+  { name: "kube_list_replicasets", description: "List ReplicaSets with desired/ready counts and owner deployment", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+  { name: "kube_list_statefulsets", description: "List StatefulSets with replica status and container image", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+  // ── Services & Networking ────────────────────────────────────────────────────
+  { name: "kube_list_services", description: "List services with type, ports, cluster IP, and external IP", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+  { name: "kube_get_service", description: "Get full details of a specific service including selector and ports", parameters: { type: "object", properties: { name: { type: "string", description: "Service name" }, namespace: { type: "string", description: "Namespace" } }, required: ["name"] } },
+  { name: "kube_list_ingresses", description: "List Ingress resources with hostnames, class, and TLS status", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+  { name: "kube_get_ingress", description: "Get routing rules and TLS config of a specific Ingress", parameters: { type: "object", properties: { name: { type: "string", description: "Ingress name" }, namespace: { type: "string", description: "Namespace" } }, required: ["name"] } },
+  { name: "kube_list_endpoints", description: "List endpoint objects showing pod IPs backing each service", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+  // ── Config & Secrets ─────────────────────────────────────────────────────────
+  { name: "kube_list_configmaps", description: "List ConfigMaps with their key names (values not shown)", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+  { name: "kube_get_configmap", description: "Get a ConfigMap and all its key-value data", parameters: { type: "object", properties: { name: { type: "string", description: "ConfigMap name" }, namespace: { type: "string", description: "Namespace" } }, required: ["name"] } },
+  { name: "kube_apply_configmap", description: "Create or update a ConfigMap with the given key-value data", parameters: { type: "object", properties: { name: { type: "string", description: "ConfigMap name" }, namespace: { type: "string", description: "Namespace" }, data: { type: "string", description: "JSON object of string key-value pairs, e.g. {\"KEY\": \"value\"}" } }, required: ["name", "data"] } },
+  { name: "kube_list_secrets", description: "List Secrets showing names, types, and key names only (values are never returned)", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+  { name: "kube_get_secret_keys", description: "Get a Secret's key names only — secret values are never returned for security", parameters: { type: "object", properties: { name: { type: "string", description: "Secret name" }, namespace: { type: "string", description: "Namespace" } }, required: ["name"] } },
+  { name: "kube_apply_secret", description: "Create or update a Secret — plain-text values are base64-encoded automatically", parameters: { type: "object", properties: { name: { type: "string", description: "Secret name" }, namespace: { type: "string", description: "Namespace" }, data: { type: "string", description: "JSON object of key-value pairs (plain text)" }, secretType: { type: "string", description: "Secret type (default: Opaque)" } }, required: ["name", "data"] } },
+  // ── Storage ──────────────────────────────────────────────────────────────────
+  { name: "kube_list_pvcs", description: "List PersistentVolumeClaims with storage class, capacity, and binding status", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+  { name: "kube_get_pvc", description: "Get details of a specific PersistentVolumeClaim", parameters: { type: "object", properties: { name: { type: "string", description: "PVC name" }, namespace: { type: "string", description: "Namespace" } }, required: ["name"] } },
+  { name: "kube_list_pvs", description: "List PersistentVolumes with capacity, access modes, and reclaim policy", parameters: { type: "object", properties: {} } },
+  { name: "kube_list_storage_classes", description: "List StorageClasses with provisioner, reclaim policy, and default class flag", parameters: { type: "object", properties: {} } },
+  // ── Jobs & CronJobs ──────────────────────────────────────────────────────────
+  { name: "kube_list_jobs", description: "List Jobs with completion status and duration", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+  { name: "kube_get_job", description: "Get details and status of a specific Job", parameters: { type: "object", properties: { name: { type: "string", description: "Job name" }, namespace: { type: "string", description: "Namespace" } }, required: ["name"] } },
+  { name: "kube_list_cronjobs", description: "List CronJobs with schedule, last run time, and suspension status", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+  { name: "kube_trigger_cronjob", description: "Manually trigger a CronJob by creating a Job from its template immediately", parameters: { type: "object", properties: { name: { type: "string", description: "CronJob name" }, namespace: { type: "string", description: "Namespace" } }, required: ["name"] } },
+  // ── DaemonSets ────────────────────────────────────────────────────────────────
+  { name: "kube_list_daemonsets", description: "List DaemonSets with desired/ready/available pod counts", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+  { name: "kube_get_daemonset", description: "Get full details of a specific DaemonSet", parameters: { type: "object", properties: { name: { type: "string", description: "DaemonSet name" }, namespace: { type: "string", description: "Namespace" } }, required: ["name"] } },
+  // ── Helm ─────────────────────────────────────────────────────────────────────
+  { name: "kube_helm_list_releases", description: "List active Helm 3 releases by querying their Kubernetes state secrets", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace to search in" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+  { name: "kube_helm_get_release_info", description: "Get chart, version, and status metadata for a specific Helm 3 release", parameters: { type: "object", properties: { name: { type: "string", description: "Helm release name" }, namespace: { type: "string", description: "Namespace where the release is installed" } }, required: ["name"] } },
+  { name: "kube_helm_delete_release", description: "Delete a Helm 3 release's state secrets — marks release as removed (does not delete workload resources)", parameters: { type: "object", properties: { name: { type: "string", description: "Helm release name" }, namespace: { type: "string", description: "Namespace" } }, required: ["name"] } },
+  // ── Manifests ─────────────────────────────────────────────────────────────────
+  { name: "kube_apply_manifest", description: "Create or update any Kubernetes resource from a JSON manifest (supports Pod, Service, Deployment, ConfigMap, Secret, Job, CronJob, Ingress, etc.)", parameters: { type: "object", properties: { manifest: { type: "string", description: "Full Kubernetes manifest as a JSON string — must include apiVersion, kind, and metadata.name" } }, required: ["manifest"] } },
+  { name: "kube_delete_resource", description: "Delete a Kubernetes resource by kind and name", parameters: { type: "object", properties: { kind: { type: "string", description: "Resource kind, e.g. Pod, Deployment, Service, ConfigMap, Secret, Job, Ingress" }, name: { type: "string", description: "Resource name" }, namespace: { type: "string", description: "Namespace (for namespaced resources)" } }, required: ["kind", "name"] } },
+  { name: "kube_describe_resource", description: "Get the full specification and live status of any Kubernetes resource", parameters: { type: "object", properties: { kind: { type: "string", description: "Resource kind, e.g. Pod, Node, Deployment, Namespace, PersistentVolume" }, name: { type: "string", description: "Resource name" }, namespace: { type: "string", description: "Namespace (for namespaced resources)" } }, required: ["kind", "name"] } },
+  // ── Observability ─────────────────────────────────────────────────────────────
+  { name: "kube_list_hpas", description: "List HorizontalPodAutoscalers with min/max replicas, current, and desired counts", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+  { name: "kube_list_resource_quotas", description: "List ResourceQuotas showing hard limits and current usage per namespace", parameters: { type: "object", properties: { namespace: { type: "string", description: "Namespace" }, allNamespaces: { type: "string", description: "Set to 'true' for all namespaces" } } } },
+];
+
+export function getToolsForProvider(cloudProvider: "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "slack" | "google_chat" | "servicenow" | "postgresql" | "kubernetes"): ToolDefinition[] {
+  if (cloudProvider === "kubernetes") return KUBERNETES_TOOLS;
+  return ALL_TOOLS[cloudProvider as keyof typeof ALL_TOOLS] ?? [];
 }
 
 export const REQUEST_APPROVAL_TOOL: ToolDefinition = {
@@ -785,10 +1399,10 @@ export function getToolByName(name: string): ToolDefinition | undefined {
   if (name === "code_interpreter") return CODE_INTERPRETER_TOOL;
   if (name === "request_approval") return REQUEST_APPROVAL_TOOL;
   if (name === "spawn_agent") return SPAWN_AGENT_TOOL;
-  return [...AWS_TOOLS, ...GCP_TOOLS, ...AZURE_TOOLS, ...RAGFLOW_TOOLS, ...JIRA_TOOLS, ...GITHUB_TOOLS, ...GITLAB_TOOLS, ...TEAMS_TOOLS, ...SLACK_TOOLS, ...GOOGLE_CHAT_TOOLS, ...SERVICENOW_TOOLS].find((t) => t.name === name);
+  return [...AWS_TOOLS, ...GCP_TOOLS, ...AZURE_TOOLS, ...RAGFLOW_TOOLS, ...JIRA_TOOLS, ...GITHUB_TOOLS, ...GITLAB_TOOLS, ...TEAMS_TOOLS, ...SLACK_TOOLS, ...GOOGLE_CHAT_TOOLS, ...SERVICENOW_TOOLS, ...POSTGRESQL_TOOLS, ...KUBERNETES_TOOLS].find((t) => t.name === name);
 }
 
-export function detectProviderFromToolName(name: string): "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "slack" | "google_chat" | "servicenow" | "sandbox" | "approval" | null {
+export function detectProviderFromToolName(name: string): "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "slack" | "google_chat" | "servicenow" | "postgresql" | "kubernetes" | "sandbox" | "approval" | null {
   if (name === "code_interpreter") return "sandbox";
   if (name === "request_approval") return "approval";
   if (name.startsWith("aws_")) return "aws";
@@ -802,5 +1416,8 @@ export function detectProviderFromToolName(name: string): "aws" | "gcp" | "azure
   if (name.startsWith("slack_")) return "slack";
   if (name.startsWith("google_chat_")) return "google_chat";
   if (name.startsWith("servicenow_")) return "servicenow";
+  if (name.startsWith("pg_")) return "postgresql";
+  if (name.startsWith("kube_")) return "kubernetes";
+  if (name.startsWith("helm_")) return "kubernetes";
   return null;
 }

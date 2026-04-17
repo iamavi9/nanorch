@@ -1,6 +1,6 @@
 import { storage } from "../storage";
 import { decrypt } from "../lib/encryption";
-import type { CloudCredentials } from "../cloud/executor";
+import type { CloudCredentials, KubernetesCredentials } from "../cloud/executor";
 import { getToolsForProvider } from "../cloud/tools";
 import type { Orchestrator, Agent } from "@shared/schema";
 
@@ -38,6 +38,23 @@ export async function loadCloudCredentials(
         loaded.push({ integrationId: integration.id, provider: "slack", credentials: { botToken: raw.botToken, defaultChannel: raw.defaultChannel } });
       } else if (integration.provider === "google_chat") {
         loaded.push({ integrationId: integration.id, provider: "google_chat", credentials: { webhookUrl: raw.webhookUrl } });
+      } else if (integration.provider === "servicenow") {
+        loaded.push({ integrationId: integration.id, provider: "servicenow", credentials: { instanceUrl: raw.instanceUrl, username: raw.username, password: raw.password } });
+      } else if (integration.provider === "postgresql") {
+        loaded.push({ integrationId: integration.id, provider: "postgresql", credentials: { connectionString: raw.connectionString } });
+      } else if (integration.provider === "kubernetes") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "kubernetes",
+          credentials: {
+            apiServer: raw.apiServer,
+            bearerToken: raw.bearerToken,
+            caCertBase64: raw.caCertBase64,
+            insecureSkipTlsVerify: raw.insecureSkipTlsVerify,
+            kubeconfigJson: raw.kubeconfigJson,
+            defaultNamespace: raw.defaultNamespace,
+          } as KubernetesCredentials,
+        });
       }
     } catch {
       await log("warn", `Failed to load credentials for integration "${integration.name}" — skipping`);
@@ -68,10 +85,12 @@ export function buildSystemPrompt(orchestrator: Orchestrator, agent: Agent | nul
 
   if (hasCloudTools) {
     parts.push(
-      `You have access to tools for cloud providers, developer platforms, and messaging services ` +
-      `(AWS, GCP, Azure, RAGFlow, Jira, GitHub, GitLab, MS Teams, Slack, Google Chat). ` +
-      `When the user asks about resources or operations on any of these platforms, use the appropriate ` +
-      `tool to fetch real data or send messages. Always summarize tool results in a clear, human-readable format.`,
+      `You have access to tools for cloud providers, developer platforms, messaging services, ITSM, databases, and Kubernetes ` +
+      `(AWS, GCP, Azure, RAGFlow, Jira, GitHub, GitLab, MS Teams, Slack, Google Chat, ServiceNow, PostgreSQL, Kubernetes). ` +
+      `When the user asks about resources or operations on any of these platforms, use the appropriate tool to fetch real data, ` +
+      `send messages, query databases, or manage cluster workloads. ` +
+      `For Kubernetes: use kube_* tools to inspect pods, deployments, services, configs, storage, jobs, and cluster state. ` +
+      `Always summarize tool results in a clear, human-readable format.`,
     );
   }
 

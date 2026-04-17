@@ -53,10 +53,11 @@ NanoOrch is a **self-hosted, multi-tenant AI agent orchestrator**. It lets teams
 | Multi-tenancy | Isolated workspaces per team or project |
 | 3-tier RBAC | Global admin → workspace admin → member |
 | SSO | OIDC (PKCE) and SAML 2.0 with auto-provisioning |
-| AI providers | OpenAI, Anthropic, Gemini, Ollama |
+| AI providers | OpenAI, Anthropic, Gemini, Ollama, vLLM (self-hosted GPU) |
 | Task execution | In-process (dev) or Docker-isolated ephemeral containers (prod) |
 | Container runtimes | Docker runc (default), gVisor runsc (hardened) |
-| Tool use | AWS, GCP, Azure, Jira, GitHub, GitLab, RAGFlow, Teams/Slack/Google Chat messaging, code interpreter |
+| Tool use | AWS, GCP, Azure, Jira, GitHub, GitLab, RAGFlow, Teams/Slack/Google Chat messaging, code interpreter, external PostgreSQL databases |
+| Git Agents | Repo-driven automation via `.nanoorch.yml`; push/PR/MR event polling; AI feedback comments posted back to the PR/MR |
 | Approval gates | Mid-task human sign-off with Slack/Teams interactive cards |
 | Pipeline / DAG | Sequential multi-agent chaining with cron scheduling |
 | Comms | Two-way Slack, Teams, and Google Chat inbound/outbound |
@@ -228,6 +229,10 @@ nanoorch/
 │   ├── 0002_add_ollama_provider.sql
 │   ├── 0003_add_sandbox_timeout.sql
 │   └── 0004_workspace_config.sql
+│                                      # Incremental migrations (applied via INCREMENTAL_MIGRATIONS in migrate.ts):
+│                                      #   add_vllm_provider_enum — adds 'vllm' to ai_provider enum
+│                                      #   add_orchestrators_vllm_api_key — adds vllmApiKey column (encrypted)
+│                                      #   cloud_provider_postgresql — adds 'postgresql' to cloud_provider enum + integration columns
 │
 ├── secrets/                       # Docker secrets helper scripts
 │   ├── create-secrets.sh          # Interactive secret-file generator
@@ -630,6 +635,7 @@ Each provider file implements the same contract:
 | `anthropic.ts` | Anthropic | Streaming via `onChunk`; tools via tool_use blocks |
 | `gemini.ts` | Gemini | Google Generative AI SDK; tools via function calling |
 | `ollama.ts` | Ollama | Local inference; OpenAI-compatible REST API; custom `baseUrl` |
+| `vllm.ts` | vLLM | Self-hosted GPU cluster; OpenAI-compatible REST API; per-orchestrator encrypted API key; base URL appends `/v1` automatically |
 
 ### Available Models
 
@@ -639,6 +645,7 @@ Each provider file implements the same contract:
 | Anthropic | claude-opus-4-5, claude-sonnet-4-5, claude-haiku-4-5 |
 | Gemini | gemini-2.5-pro, gemini-2.5-flash |
 | Ollama | Any model served locally (free-text model name) |
+| vLLM | Any model served by the vLLM inference server (free-text model name; e.g. `meta-llama/Llama-3-8b-instruct`) |
 
 ### Failover
 
@@ -962,6 +969,22 @@ Tool definitions follow the JSON Schema format and are passed to AI providers in
 | `servicenow_get_catalog_items` | List active Service Catalog items (optionally filtered by search query) |
 
 Credential fields: `instanceUrl`, `username`, `password`. Requires ITIL + catalog roles in ServiceNow. Provider key: `servicenow`. Category: ITSM.
+
+### PostgreSQL Tools (Database Integration)
+
+Agents can introspect and query an external PostgreSQL database. The connection string is stored AES-256-GCM encrypted in `cloud_integrations.credentials`. Provider key: `postgresql`. Category: cloud (uses `cloud_provider` enum value `postgresql`).
+
+| Tool Name | Description | Safety |
+|---|---|---|
+| `pg_list_schemas` | List all non-system schemas in the database | Read-only |
+| `pg_list_tables` | List all tables in a given schema with row count estimates | Read-only |
+| `pg_describe_table` | Show column names, types, nullability, and default values for a table | Read-only |
+| `pg_query` | Execute a read-only SELECT query; returns up to 100 rows as JSON | Read-only (SELECT only) |
+| `pg_execute` | Execute an INSERT/UPDATE/DELETE statement | **Requires approval gate** |
+
+`pg_execute` automatically triggers an approval gate (`request_approval` call) before running any write statement. The pending approval appears in the Approvals page and can be sent as an interactive Slack/Teams card. On rejection, the write is skipped and the agent is notified.
+
+Credential field: `connectionString` (full PostgreSQL connection string, e.g. `postgresql://user:pass@host:5432/db`). Stored encrypted; never exposed to agent containers.
 
 ### Built-In Tools
 

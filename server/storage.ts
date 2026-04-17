@@ -1,10 +1,11 @@
 import { eq, desc, and, inArray, sql, gte, count } from "drizzle-orm";
-import { db } from "./db";
+import { db, pool } from "./db";
 import {
   users, workspaces, workspaceMembers, orchestrators, agents, channels, channelDeliveries, tasks, taskLogs, agentMemory, cloudIntegrations,
   chatConversations, chatMessages, scheduledJobs,
   approvalRequests, pipelines, pipelineSteps, pipelineRuns, pipelineStepRuns, tokenUsage,
   workspaceConfig, commsThreads, ssoProviders, eventTriggers, triggerEvents, mcpApiKeys,
+  gitAgents, gitRepos, gitAgentRuns, globalSettings, providerKeys,
   type User, type InsertUser,
   type Workspace, type InsertWorkspace,
   type Orchestrator, type InsertOrchestrator,
@@ -30,6 +31,11 @@ import {
   type EventTrigger, type InsertEventTrigger,
   type TriggerEvent,
   type McpApiKey,
+  type GitAgent, type InsertGitAgent,
+  type GitRepo, type InsertGitRepo,
+  type GitAgentRun,
+  type GlobalSettings,
+  type ProviderKey,
 } from "@shared/schema";
 
 export type WorkspaceMemberWithUser = {
@@ -102,11 +108,14 @@ export interface IStorage {
   updateTask(id: string, data: Partial<Task>): Promise<Task>;
 
   listTaskLogs(taskId: string): Promise<TaskLog[]>;
-  createTaskLog(data: { taskId: string; level: "info" | "warn" | "error"; message: string; metadata?: Record<string, unknown> }): Promise<TaskLog>;
+  createTaskLog(data: { taskId: string; level: "info" | "warn" | "error"; message: string; metadata?: Record<string, unknown>; logType?: string; parentLogId?: number }): Promise<TaskLog>;
 
   getAgentMemory(agentId: string, key: string): Promise<string | null>;
   setAgentMemory(agentId: string, key: string, value: string): Promise<void>;
   listAgentMemory(agentId: string): Promise<AgentMemory[]>;
+
+  storeVectorMemory(agentId: string, workspaceId: string, content: string, embedding: number[], source: string, taskId?: string): Promise<void>;
+  retrieveVectorMemories(agentId: string, workspaceId: string, queryEmbedding: number[], limit?: number): Promise<Array<{ content: string; source: string; similarity: number }>>;
 
   listCloudIntegrations(workspaceId: string): Promise<CloudIntegration[]>;
   getCloudIntegration(id: string): Promise<CloudIntegration | undefined>;
@@ -179,6 +188,14 @@ export interface IStorage {
     byProvider: Array<{ provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number }>;
     recentUsage: TokenUsage[];
   }>;
+  getGlobalTokenStats(days?: number): Promise<{
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalCostUsd: number;
+    byWorkspace: Array<{ workspaceId: string; workspaceName: string; inputTokens: number; outputTokens: number; costUsd: number; calls: number }>;
+    byDay: Array<{ date: string; inputTokens: number; outputTokens: number; costUsd: number }>;
+    byProvider: Array<{ provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number }>;
+  }>;
 
   getChannelById(id: string): Promise<Channel | undefined>;
   getOrchestratorForChannel(channelId: string): Promise<Orchestrator | undefined>;
@@ -216,6 +233,33 @@ export interface IStorage {
   getMcpApiKeyByHash(keyHash: string): Promise<McpApiKey | undefined>;
   updateMcpApiKeyLastUsed(id: string): Promise<void>;
   deleteMcpApiKey(id: string): Promise<void>;
+
+  listGitAgents(workspaceId: string): Promise<GitAgent[]>;
+  getGitAgent(id: string): Promise<GitAgent | undefined>;
+  getGitAgentBySlug(workspaceId: string, slug: string): Promise<GitAgent | undefined>;
+  createGitAgent(data: InsertGitAgent): Promise<GitAgent>;
+  updateGitAgent(id: string, data: Partial<InsertGitAgent>): Promise<GitAgent>;
+  deleteGitAgent(id: string): Promise<void>;
+  countGitAgentRuns(gitAgentId: string): Promise<number>;
+
+  listGitRepos(workspaceId: string): Promise<GitRepo[]>;
+  getGitRepo(id: string): Promise<GitRepo | undefined>;
+  createGitRepo(data: InsertGitRepo): Promise<GitRepo>;
+  updateGitRepo(id: string, data: Partial<GitRepo>): Promise<GitRepo>;
+  deleteGitRepo(id: string): Promise<void>;
+
+  listGitAgentRuns(repoId: string, limit?: number): Promise<GitAgentRun[]>;
+  listGitAgentRunsByAgent(gitAgentId: string, limit?: number): Promise<GitAgentRun[]>;
+  createGitAgentRun(data: Omit<GitAgentRun, "id" | "createdAt">): Promise<GitAgentRun>;
+  updateGitAgentRun(id: string, data: Partial<GitAgentRun>): Promise<GitAgentRun>;
+
+  getGlobalSettings(): Promise<GlobalSettings>;
+  updateGlobalSettings(data: Partial<Pick<GlobalSettings, "appName" | "appLogoUrl" | "faviconUrl">>): Promise<GlobalSettings>;
+
+  listProviderKeys(workspaceId: string | null): Promise<ProviderKey[]>;
+  getProviderKey(workspaceId: string | null, provider: string): Promise<ProviderKey | null>;
+  upsertProviderKey(workspaceId: string | null, provider: string, encryptedKey: string, baseUrl: string | null, label: string | null, updatedBy: string | null): Promise<ProviderKey>;
+  deleteProviderKey(workspaceId: string | null, provider: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -330,7 +374,9 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getWorkspaceBySlug(slug: string) {
-    const [ws] = await db.select().from(workspaces).where(eq(workspaces.slug, slug));
+    const normalized = slug.trim().toLowerCase();
+    const [ws] = await db.select().from(workspaces)
+      .where(sql`lower(trim(${workspaces.slug})) = ${normalized}`);
     return ws;
   }
 
@@ -339,11 +385,15 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createWorkspace(data: InsertWorkspace) {
-    const [ws] = await db.insert(workspaces).values(data).returning();
+    const normalized = { ...data, slug: data.slug?.trim().toLowerCase().replace(/\s+/g, "-") };
+    const [ws] = await db.insert(workspaces).values(normalized).returning();
     return ws;
   }
 
   async updateWorkspace(id: string, data: Partial<InsertWorkspace>) {
+    if (data.slug !== undefined) {
+      data = { ...data, slug: data.slug?.trim().toLowerCase().replace(/\s+/g, "-") };
+    }
     const [ws] = await db.update(workspaces).set(data).where(eq(workspaces.id, id)).returning();
     return ws;
   }
@@ -530,12 +580,14 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(taskLogs).where(eq(taskLogs.taskId, taskId)).orderBy(taskLogs.timestamp);
   }
 
-  async createTaskLog(data: { taskId: string; level: "info" | "warn" | "error"; message: string; metadata?: Record<string, unknown> }) {
+  async createTaskLog(data: { taskId: string; level: "info" | "warn" | "error"; message: string; metadata?: Record<string, unknown>; logType?: string; parentLogId?: number }) {
     const [log] = await db.insert(taskLogs).values({
       taskId: data.taskId,
       level: data.level,
       message: data.message,
       metadata: data.metadata ?? {},
+      logType: data.logType ?? "info",
+      parentLogId: data.parentLogId ?? null,
     }).returning();
     return log;
   }
@@ -553,6 +605,40 @@ export class DatabaseStorage implements IStorage {
 
   async listAgentMemory(agentId: string) {
     return db.select().from(agentMemory).where(eq(agentMemory.agentId, agentId));
+  }
+
+  async storeVectorMemory(
+    agentId: string,
+    workspaceId: string,
+    content: string,
+    embedding: number[],
+    source: string,
+    taskId?: string,
+  ): Promise<void> {
+    const embStr = `[${embedding.join(",")}]`;
+    await pool.query(
+      `INSERT INTO agent_memory_vectors (agent_id, workspace_id, task_id, content, embedding, source)
+       VALUES ($1, $2, $3, $4, $5::vector, $6)`,
+      [agentId, workspaceId, taskId ?? null, content.slice(0, 2000), embStr, source],
+    );
+  }
+
+  async retrieveVectorMemories(
+    agentId: string,
+    workspaceId: string,
+    queryEmbedding: number[],
+    limit = 5,
+  ): Promise<Array<{ content: string; source: string; similarity: number }>> {
+    const embStr = `[${queryEmbedding.join(",")}]`;
+    const { rows } = await pool.query(
+      `SELECT content, source, 1 - (embedding <=> $1::vector) AS similarity
+       FROM agent_memory_vectors
+       WHERE agent_id = $2 AND workspace_id = $3
+       ORDER BY embedding <=> $1::vector
+       LIMIT $4`,
+      [embStr, agentId, workspaceId, limit],
+    );
+    return rows as Array<{ content: string; source: string; similarity: number }>;
   }
 
   async listCloudIntegrations(workspaceId: string) {
@@ -660,6 +746,7 @@ export class DatabaseStorage implements IStorage {
         instructions: agents.instructions,
         tools: agents.tools,
         memoryEnabled: agents.memoryEnabled,
+        reactEnabled: agents.reactEnabled,
         maxTokens: agents.maxTokens,
         temperature: agents.temperature,
         sandboxTimeoutSeconds: agents.sandboxTimeoutSeconds,
@@ -1019,6 +1106,81 @@ export class DatabaseStorage implements IStorage {
     return { totalInputTokens, totalOutputTokens, totalCostUsd, byAgent, byDay, byProvider, recentUsage: rows.slice(0, 50) };
   }
 
+  async getGlobalTokenStats(days = 30) {
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const rows = await db
+      .select({
+        workspaceId: tokenUsage.workspaceId,
+        workspaceName: workspaces.name,
+        provider: tokenUsage.provider,
+        model: tokenUsage.model,
+        inputTokens: tokenUsage.inputTokens,
+        outputTokens: tokenUsage.outputTokens,
+        estimatedCostUsd: tokenUsage.estimatedCostUsd,
+        createdAt: tokenUsage.createdAt,
+      })
+      .from(tokenUsage)
+      .leftJoin(workspaces, eq(tokenUsage.workspaceId, workspaces.id))
+      .where(gte(tokenUsage.createdAt, since))
+      .orderBy(desc(tokenUsage.createdAt));
+
+    const totalInputTokens = rows.reduce((s, r) => s + r.inputTokens, 0);
+    const totalOutputTokens = rows.reduce((s, r) => s + r.outputTokens, 0);
+    const totalCostUsd = rows.reduce((s, r) => s + (r.estimatedCostUsd ?? 0), 0);
+
+    const allWorkspaces = await db.select({ id: workspaces.id, name: workspaces.name }).from(workspaces);
+
+    const wsMap = new Map<string, { workspaceName: string; inputTokens: number; outputTokens: number; costUsd: number; calls: number }>();
+    for (const ws of allWorkspaces) {
+      wsMap.set(ws.id, { workspaceName: ws.name, inputTokens: 0, outputTokens: 0, costUsd: 0, calls: 0 });
+    }
+    for (const r of rows) {
+      const existing = wsMap.get(r.workspaceId) ?? { workspaceName: r.workspaceName ?? r.workspaceId, inputTokens: 0, outputTokens: 0, costUsd: 0, calls: 0 };
+      wsMap.set(r.workspaceId, {
+        workspaceName: existing.workspaceName,
+        inputTokens: existing.inputTokens + r.inputTokens,
+        outputTokens: existing.outputTokens + r.outputTokens,
+        costUsd: existing.costUsd + (r.estimatedCostUsd ?? 0),
+        calls: existing.calls + 1,
+      });
+    }
+    const byWorkspace = Array.from(wsMap.entries())
+      .map(([workspaceId, stats]) => ({ workspaceId, ...stats }))
+      .sort((a, b) => b.calls - a.calls);
+
+    const dayMap = new Map<string, { inputTokens: number; outputTokens: number; costUsd: number }>();
+    for (const r of rows) {
+      const date = (r.createdAt ?? new Date()).toISOString().slice(0, 10);
+      const existing = dayMap.get(date) ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+      dayMap.set(date, {
+        inputTokens: existing.inputTokens + r.inputTokens,
+        outputTokens: existing.outputTokens + r.outputTokens,
+        costUsd: existing.costUsd + (r.estimatedCostUsd ?? 0),
+      });
+    }
+    const byDay = Array.from(dayMap.entries())
+      .map(([date, stats]) => ({ date, ...stats }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    const provMap = new Map<string, { inputTokens: number; outputTokens: number; costUsd: number }>();
+    for (const r of rows) {
+      const key = `${r.provider}::${r.model}`;
+      const existing = provMap.get(key) ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+      provMap.set(key, {
+        inputTokens: existing.inputTokens + r.inputTokens,
+        outputTokens: existing.outputTokens + r.outputTokens,
+        costUsd: existing.costUsd + (r.estimatedCostUsd ?? 0),
+      });
+    }
+    const byProvider = Array.from(provMap.entries()).map(([key, stats]) => {
+      const [provider, model] = key.split("::");
+      return { provider, model, ...stats };
+    });
+
+    return { totalInputTokens, totalOutputTokens, totalCostUsd, byWorkspace, byDay, byProvider };
+  }
+
   async getChannelById(id: string) {
     return this.getChannel(id);
   }
@@ -1195,6 +1357,137 @@ export class DatabaseStorage implements IStorage {
 
   async deleteMcpApiKey(id: string): Promise<void> {
     await db.delete(mcpApiKeys).where(eq(mcpApiKeys.id, id));
+  }
+
+  async listGitAgents(workspaceId: string): Promise<GitAgent[]> {
+    return db.select().from(gitAgents).where(eq(gitAgents.workspaceId, workspaceId)).orderBy(desc(gitAgents.createdAt));
+  }
+
+  async getGitAgent(id: string): Promise<GitAgent | undefined> {
+    const [row] = await db.select().from(gitAgents).where(eq(gitAgents.id, id));
+    return row;
+  }
+
+  async getGitAgentBySlug(workspaceId: string, slug: string): Promise<GitAgent | undefined> {
+    const [row] = await db.select().from(gitAgents).where(and(eq(gitAgents.workspaceId, workspaceId), eq(gitAgents.slug, slug)));
+    return row;
+  }
+
+  async createGitAgent(data: InsertGitAgent): Promise<GitAgent> {
+    const [row] = await db.insert(gitAgents).values(data as any).returning();
+    return row;
+  }
+
+  async updateGitAgent(id: string, data: Partial<InsertGitAgent>): Promise<GitAgent> {
+    const [row] = await db.update(gitAgents).set(data as any).where(eq(gitAgents.id, id)).returning();
+    return row;
+  }
+
+  async deleteGitAgent(id: string): Promise<void> {
+    await db.delete(gitAgents).where(eq(gitAgents.id, id));
+  }
+
+  async countGitAgentRuns(gitAgentId: string): Promise<number> {
+    const [row] = await db.select({ count: count() }).from(gitAgentRuns).where(eq(gitAgentRuns.gitAgentId, gitAgentId));
+    return row?.count ?? 0;
+  }
+
+  async listGitRepos(workspaceId: string): Promise<GitRepo[]> {
+    return db.select().from(gitRepos).where(eq(gitRepos.workspaceId, workspaceId)).orderBy(desc(gitRepos.createdAt));
+  }
+
+  async getGitRepo(id: string): Promise<GitRepo | undefined> {
+    const [row] = await db.select().from(gitRepos).where(eq(gitRepos.id, id));
+    return row;
+  }
+
+  async createGitRepo(data: InsertGitRepo): Promise<GitRepo> {
+    const [row] = await db.insert(gitRepos).values(data).returning();
+    return row;
+  }
+
+  async updateGitRepo(id: string, data: Partial<GitRepo>): Promise<GitRepo> {
+    const [row] = await db.update(gitRepos).set(data).where(eq(gitRepos.id, id)).returning();
+    return row;
+  }
+
+  async deleteGitRepo(id: string): Promise<void> {
+    await db.delete(gitRepos).where(eq(gitRepos.id, id));
+  }
+
+  async listGitAgentRuns(repoId: string, limit = 50): Promise<GitAgentRun[]> {
+    return db.select().from(gitAgentRuns).where(eq(gitAgentRuns.repoId, repoId)).orderBy(desc(gitAgentRuns.createdAt)).limit(limit);
+  }
+
+  async listGitAgentRunsByAgent(gitAgentId: string, limit = 50): Promise<GitAgentRun[]> {
+    return db.select().from(gitAgentRuns).where(eq(gitAgentRuns.gitAgentId, gitAgentId)).orderBy(desc(gitAgentRuns.createdAt)).limit(limit);
+  }
+
+  async createGitAgentRun(data: Omit<GitAgentRun, "id" | "createdAt">): Promise<GitAgentRun> {
+    const [row] = await db.insert(gitAgentRuns).values(data as any).returning();
+    return row;
+  }
+
+  async updateGitAgentRun(id: string, data: Partial<GitAgentRun>): Promise<GitAgentRun> {
+    const [row] = await db.update(gitAgentRuns).set(data as any).where(eq(gitAgentRuns.id, id)).returning();
+    return row;
+  }
+
+  async getGlobalSettings(): Promise<GlobalSettings> {
+    const [row] = await db.select().from(globalSettings).where(eq(globalSettings.id, "singleton"));
+    return row ?? { id: "singleton", appName: "NanoOrch", appLogoUrl: null, faviconUrl: null, updatedAt: new Date() };
+  }
+
+  async updateGlobalSettings(data: Partial<Pick<GlobalSettings, "appName" | "appLogoUrl" | "faviconUrl">>): Promise<GlobalSettings> {
+    const [row] = await db
+      .update(globalSettings)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(globalSettings.id, "singleton"))
+      .returning();
+    return row;
+  }
+
+  async listProviderKeys(workspaceId: string | null): Promise<ProviderKey[]> {
+    if (workspaceId === null) {
+      return db.select().from(providerKeys).where(sql`${providerKeys.workspaceId} IS NULL`);
+    }
+    return db.select().from(providerKeys).where(eq(providerKeys.workspaceId, workspaceId));
+  }
+
+  async getProviderKey(workspaceId: string | null, provider: string): Promise<ProviderKey | null> {
+    let rows: ProviderKey[];
+    if (workspaceId === null) {
+      rows = await db.select().from(providerKeys).where(
+        and(sql`${providerKeys.workspaceId} IS NULL`, eq(providerKeys.provider, provider))
+      );
+    } else {
+      rows = await db.select().from(providerKeys).where(
+        and(eq(providerKeys.workspaceId, workspaceId), eq(providerKeys.provider, provider))
+      );
+    }
+    return rows[0] ?? null;
+  }
+
+  async upsertProviderKey(workspaceId: string | null, provider: string, encryptedKey: string, baseUrl: string | null, label: string | null, updatedBy: string | null): Promise<ProviderKey> {
+    const existing = await this.getProviderKey(workspaceId, provider);
+    if (existing) {
+      const [row] = await db.update(providerKeys)
+        .set({ encryptedKey, baseUrl, label, updatedBy, updatedAt: new Date() })
+        .where(eq(providerKeys.id, existing.id))
+        .returning();
+      return row;
+    }
+    const [row] = await db.insert(providerKeys)
+      .values({ workspaceId, provider, encryptedKey, baseUrl, label, updatedBy, updatedAt: new Date() })
+      .returning();
+    return row;
+  }
+
+  async deleteProviderKey(workspaceId: string | null, provider: string): Promise<void> {
+    const existing = await this.getProviderKey(workspaceId, provider);
+    if (existing) {
+      await db.delete(providerKeys).where(eq(providerKeys.id, existing.id));
+    }
   }
 }
 

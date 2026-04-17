@@ -10,7 +10,10 @@ import { taskLogEmitter } from "./emitter";
 import type { Orchestrator, Agent } from "@shared/schema";
 import type { ProviderMessage } from "../providers";
 import { executeCodeInSandbox } from "./sandbox-executor";
-import { issueTaskToken, revokeTaskToken } from "../proxy/inference-proxy";
+import { issueTaskToken, revokeTaskToken, getAndClearProxiedUsage } from "../proxy/inference-proxy";
+import { generateEmbedding } from "../lib/embeddings";
+import { estimateTokenCost } from "./token-cost";
+import { getRepoWorkspace } from "./git-clone";
 
 const MAX_TOOL_ROUNDS = 10;
 const CONTAINER_TIMEOUT_MS = 180_000;
@@ -38,10 +41,28 @@ export async function executeTaskInDocker(taskId: string): Promise<void> {
 
   await storage.updateTask(taskId, { status: "running", startedAt: new Date() });
 
-  const log = async (level: "info" | "warn" | "error", message: string, metadata?: Record<string, unknown>) => {
-    const entry = await storage.createTaskLog({ taskId, level, message, metadata });
+  const log = async (
+    level: "info" | "warn" | "error",
+    message: string,
+    metadata?: Record<string, unknown>,
+    logType?: string,
+    parentLogId?: number,
+  ) => {
+    const entry = await storage.createTaskLog({ taskId, level, message, metadata, logType: logType ?? "info", parentLogId });
     taskLogEmitter.emit(`task:${taskId}`, { ...entry, timestamp: entry.timestamp ?? new Date() });
+    return entry;
   };
+
+  // Decrypt vLLM API key if this orchestrator uses vLLM (self-hosted inference server).
+  let vllmApiKey: string | null = null;
+  if (orchestrator.provider === "vllm" && (orchestrator as any).vllmApiKey) {
+    try {
+      const { decrypt } = await import("../lib/encryption");
+      vllmApiKey = decrypt((orchestrator as any).vllmApiKey);
+    } catch {
+      // If decryption fails (key changed), proceed without key
+    }
+  }
 
   // Issue a short-lived proxy token for this task.  The agent container
   // receives this token instead of real API keys; the inference proxy on
@@ -67,6 +88,19 @@ export async function executeTaskInDocker(taskId: string): Promise<void> {
         const memStr = memory.map((m) => `${m.key}: ${m.value}`).join("\n");
         messages.push({ role: "system", content: `Agent memory:\n${memStr}` });
       }
+      try {
+        const queryEmb = await generateEmbedding(task.input);
+        if (queryEmb) {
+          const vecMems = await storage.retrieveVectorMemories(agent.id, orchestrator.workspaceId, queryEmb, 5);
+          const relevant = vecMems.filter((m) => m.similarity >= 0.70);
+          if (relevant.length > 0) {
+            const memStr = relevant.map((m, i) => `${i + 1}. [${m.source}] ${m.content}`).join("\n\n");
+            messages.push({ role: "system", content: `Relevant memories from past tasks:\n${memStr}` });
+            await log("info", `Vector memory: ${relevant.length} relevant entr${relevant.length === 1 ? "y" : "ies"} injected`);
+          }
+        }
+      } catch {
+      }
     }
 
     messages.push({ role: "user", content: task.input });
@@ -88,6 +122,7 @@ export async function executeTaskInDocker(taskId: string): Promise<void> {
         messages,
         tools: availableTools,
         taskToken,
+        vllmApiKey,
         log,
       });
 
@@ -99,22 +134,23 @@ export async function executeTaskInDocker(taskId: string): Promise<void> {
 
       if (roundResult.type === "tool_calls") {
         if (roundResult.assistantContent) {
+          await log("info", roundResult.assistantContent, {}, "reasoning");
           messages.push({ role: "assistant", content: roundResult.assistantContent });
         }
 
         for (const toolCall of roundResult.toolCalls) {
           if (toolCall.name === "code_interpreter") {
             const { language, code } = toolCall.arguments as { language: string; code: string };
-            await log("info", `[container] Running ${language} code in sandbox`);
+            const callEntry = await log("info", `Running ${language} code in sandbox`, { tool: "code_interpreter", args: { language, code: code.slice(0, 200) } }, "tool_call");
             try {
               const sandboxResult = await executeCodeInSandbox(language, code);
-              const output = sandboxResult.exitCode === 0
+              const resultText = sandboxResult.exitCode === 0
                 ? `exit_code: 0\nstdout:\n${sandboxResult.stdout || "(no output)"}`
                 : `exit_code: ${sandboxResult.exitCode}\nstdout:\n${sandboxResult.stdout || "(no output)"}\nstderr:\n${sandboxResult.stderr || "(none)"}`;
-              await log("info", `Sandbox execution completed (exit ${sandboxResult.exitCode})`);
-              messages.push({ role: "user", content: `Tool code_interpreter result:\n${output}` });
+              await log("info", `Sandbox: exit ${sandboxResult.exitCode}`, { result: resultText.slice(0, 500) }, "tool_result", callEntry.id);
+              messages.push({ role: "user", content: `Tool code_interpreter result:\n${resultText}` });
             } catch (err: any) {
-              await log("error", `Sandbox execution failed: ${err.message}`);
+              await log("error", `Sandbox execution failed: ${err.message}`, {}, "tool_result", callEntry.id);
               messages.push({ role: "user", content: `Tool code_interpreter result: ERROR — ${err.message}` });
             }
             continue;
@@ -122,12 +158,12 @@ export async function executeTaskInDocker(taskId: string): Promise<void> {
 
           const cloudProvider = detectProviderFromToolName(toolCall.name);
           const safeArgs = sanitizeToolArgs(toolCall.arguments);
-          await log("info", `[container] Calling tool: ${toolCall.name}`, { args: safeArgs });
+          const callEntry = await log("info", `Calling tool: ${toolCall.name}`, { tool: toolCall.name, args: safeArgs }, "tool_call");
 
           const matchedCred = cloudCreds.find((c) => c.provider === cloudProvider);
           if (!matchedCred) {
             const errMsg = `No active ${cloudProvider} integration found for this workspace`;
-            await log("warn", errMsg);
+            await log("warn", errMsg, {}, "tool_result", callEntry.id);
             messages.push({ role: "user", content: `Tool ${toolCall.name} result: ERROR — ${errMsg}` });
             continue;
           }
@@ -136,11 +172,11 @@ export async function executeTaskInDocker(taskId: string): Promise<void> {
             const toolResult = await executeCloudTool(toolCall.name, toolCall.arguments, matchedCred);
             await storage.touchCloudIntegration(matchedCred.integrationId);
             const resultStr = JSON.stringify(toolResult, null, 2);
-            await log("info", `Tool ${toolCall.name} completed`, { resultLength: resultStr.length });
+            await log("info", `Tool ${toolCall.name} completed`, { result: resultStr.slice(0, 1000), resultLength: resultStr.length }, "tool_result", callEntry.id);
             messages.push({ role: "user", content: `Tool ${toolCall.name} result:\n${resultStr}` });
           } catch (toolErr: any) {
             const errMsg = toolErr?.message ?? String(toolErr);
-            await log("error", `Tool ${toolCall.name} failed: ${errMsg}`);
+            await log("error", `Tool ${toolCall.name} failed: ${errMsg}`, {}, "tool_result", callEntry.id);
             messages.push({ role: "user", content: `Tool ${toolCall.name} result: ERROR — ${errMsg}` });
           }
         }
@@ -163,6 +199,7 @@ export async function executeTaskInDocker(taskId: string): Promise<void> {
         messages: [...messages, { role: "user", content: "Please provide your final answer based on the tool results above." }],
         tools: [],
         taskToken,
+        vllmApiKey,
         log,
       });
       if (finalResult.type === "result") {
@@ -173,8 +210,33 @@ export async function executeTaskInDocker(taskId: string): Promise<void> {
 
     await log("info", `Task completed in sandbox — output length: ${output.length} chars`);
 
+    // Record token usage captured by the inference proxy for this task.
+    const proxiedUsage = getAndClearProxiedUsage(taskId);
+    if (proxiedUsage && (proxiedUsage.inputTokens > 0 || proxiedUsage.outputTokens > 0)) {
+      const costUsd = estimateTokenCost(orchestrator.provider, orchestrator.model, proxiedUsage.inputTokens, proxiedUsage.outputTokens);
+      storage.createTokenUsage({
+        workspaceId: orchestrator.workspaceId,
+        taskId,
+        agentId:   agent?.id   ?? null,
+        agentName: agent?.name || `${orchestrator.name} (direct)`,
+        provider:  orchestrator.provider,
+        model:     orchestrator.model,
+        inputTokens:      proxiedUsage.inputTokens,
+        outputTokens:     proxiedUsage.outputTokens,
+        estimatedCostUsd: costUsd,
+      }).catch(console.error);
+      await log("info", `Token usage: ${proxiedUsage.inputTokens} in / ${proxiedUsage.outputTokens} out (~$${costUsd.toFixed(6)})`);
+    }
+
     if (agent?.memoryEnabled && agent) {
-      await storage.setAgentMemory(agent.id, `last_output_${Date.now()}`, output.slice(0, 500));
+      await storage.setAgentMemory(agent.id, "last_task_output", output.slice(0, 500));
+      generateEmbedding(output.slice(0, 4000))
+        .then((emb) => {
+          if (emb) {
+            storage.storeVectorMemory(agent.id, orchestrator.workspaceId, output, emb, "task_output", taskId).catch(() => {});
+          }
+        })
+        .catch(() => {});
     }
 
     await storage.updateTask(taskId, {
@@ -182,6 +244,7 @@ export async function executeTaskInDocker(taskId: string): Promise<void> {
       output,
       completedAt: new Date(),
     });
+    taskLogEmitter.emit(`task:${taskId}`, { type: "done", status: "completed" });
   } catch (err: any) {
     const message = err?.message ?? String(err);
     // "Connection error." is the OpenAI SDK's APIConnectionError — the agent
@@ -201,6 +264,7 @@ export async function executeTaskInDocker(taskId: string): Promise<void> {
       errorMessage: message + (isConnErr ? " (inference proxy unreachable — see server logs)" : ""),
       completedAt: new Date(),
     });
+    taskLogEmitter.emit(`task:${taskId}`, { type: "done", status: "failed" });
   } finally {
     // Always revoke the proxy token — containers can no longer call AI APIs
     // after the task finishes, regardless of how it ended.
@@ -221,9 +285,10 @@ async function runInContainer(opts: {
   messages: ProviderMessage[];
   tools: ReturnType<typeof buildToolList>;
   taskToken: string;
-  log: (level: "info" | "warn" | "error", msg: string) => Promise<void>;
+  vllmApiKey: string | null;
+  log: (level: "info" | "warn" | "error", msg: string, metadata?: Record<string, unknown>, logType?: string, parentLogId?: number) => Promise<any>;
 }): Promise<ContainerResult> {
-  const { taskId, round, orchestrator, agent, systemPrompt, messages, tools, taskToken, log } = opts;
+  const { taskId, round, orchestrator, agent, systemPrompt, messages, tools, taskToken, vllmApiKey, log } = opts;
 
   const agentImage = process.env.AGENT_IMAGE ?? "nanoorch-agent:latest";
 
@@ -245,6 +310,9 @@ async function runInContainer(opts: {
   // The container receives a short-lived task token instead of real API keys.
   // The inference proxy on the host verifies the token and injects the real
   // credential before forwarding to the upstream provider.
+  // Check if a cloned repo directory was registered for this task (git agents).
+  const repoDir = getRepoWorkspace(taskId);
+
   const envArgs: string[] = [
     "--env", `TASK_ID=${taskId}`,
     "--env", `PROVIDER=${orchestrator.provider}`,
@@ -262,6 +330,15 @@ async function runInContainer(opts: {
     "--env", `ANTHROPIC_BASE_URL=${proxyBase}/anthropic`,
     "--env", `GEMINI_API_KEY=${taskToken}`,
     "--env", `GEMINI_BASE_URL=${proxyBase}/gemini`,
+    // vLLM: pass base URL and optional API key directly to the container.
+    // vLLM is a self-hosted server, so no proxy is needed — the container
+    // connects directly to the vLLM inference server using the OpenAI-compatible API.
+    ...(orchestrator.provider === "vllm" ? [
+      "--env", `VLLM_API_KEY=${vllmApiKey || "vllm"}`,
+      "--env", `VLLM_BASE_URL=${(orchestrator.baseUrl ?? "http://localhost:8000").replace(/\/$/, "") + "/v1"}`,
+    ] : []),
+    // Git agent: tell the container where the repo is mounted (if available).
+    ...(repoDir ? ["--env", "GIT_WORKSPACE=/workspace"] : []),
   ];
 
   const containerName = `nanoorch-agent-${taskId.slice(0, 8)}-r${round}`;
@@ -292,6 +369,9 @@ async function runInContainer(opts: {
         ? ["--security-opt", `seccomp=${process.env.SECCOMP_PROFILE}`]
         : (console.warn(`[agent] SECCOMP_PROFILE is set but file not found at ${process.env.SECCOMP_PROFILE} — seccomp disabled. Copy agent/seccomp/nanoorch.json to that path.`), [])
       : []),
+    // Git agent: mount the cloned repository read-only at /workspace inside the container.
+    // GIT_WORKSPACE=/workspace env var tells the agent where to find the code.
+    ...(repoDir ? ["--volume", `${repoDir}:/workspace:ro`] : []),
     ...envArgs,
     agentImage,
   ];
@@ -318,6 +398,9 @@ async function runInContainer(opts: {
 
         if (parsed.type === "log") {
           await log(parsed.level ?? "info", `[sandbox] ${parsed.message}`);
+        } else if (parsed.type === "token") {
+          // Relay individual LLM tokens directly to the frontend — not stored to DB
+          taskLogEmitter.emit(`task:${opts.taskId}:token`, parsed.content ?? "");
         } else if (parsed.type === "result") {
           containerResult = { type: "result", output: parsed.output ?? "" };
         } else if (parsed.type === "tool_calls") {
@@ -361,7 +444,7 @@ async function runInContainer(opts: {
 
 async function loadCloudCredentials(
   workspaceId: string,
-  log: (level: "info" | "warn" | "error", msg: string) => Promise<void>
+  log: (level: "info" | "warn" | "error", msg: string) => Promise<any>
 ): Promise<LoadedCredential[]> {
   const integrations = await storage.getCloudIntegrationsForWorkspace(workspaceId);
   const loaded: LoadedCredential[] = [];
@@ -455,6 +538,31 @@ async function loadCloudCredentials(
           provider: "google_chat",
           credentials: { webhookUrl: raw.webhookUrl },
         });
+      } else if (integration.provider === "servicenow") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "servicenow",
+          credentials: { instanceUrl: raw.instanceUrl, username: raw.username, password: raw.password },
+        });
+      } else if (integration.provider === "postgresql") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "postgresql",
+          credentials: { connectionString: raw.connectionString },
+        });
+      } else if (integration.provider === "kubernetes") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "kubernetes",
+          credentials: {
+            apiServer: raw.apiServer,
+            bearerToken: raw.bearerToken,
+            caCertBase64: raw.caCertBase64,
+            insecureSkipTlsVerify: raw.insecureSkipTlsVerify,
+            kubeconfigJson: raw.kubeconfigJson,
+            defaultNamespace: raw.defaultNamespace,
+          },
+        });
       }
     } catch {
       await log("warn", `Failed to load credentials for integration "${integration.name}" — skipping`);
@@ -485,8 +593,8 @@ function buildSystemPrompt(orchestrator: Orchestrator, agent: Agent | null, hasC
 
   if (hasCloudTools) {
     parts.push(
-      `You have access to tools for cloud providers, developer platforms, and messaging services (AWS, GCP, Azure, RAGFlow, Jira, GitHub, GitLab, MS Teams, Slack, Google Chat). ` +
-      `When the user asks about resources or operations on any of these platforms, use the appropriate tool to fetch real data or send messages. ` +
+      `You have access to tools for cloud providers, developer platforms, messaging services, ITSM, and databases (AWS, GCP, Azure, RAGFlow, Jira, GitHub, GitLab, MS Teams, Slack, Google Chat, ServiceNow, PostgreSQL). ` +
+      `When the user asks about resources or operations on any of these platforms, use the appropriate tool to fetch real data, send messages, or query databases. ` +
       `Always summarize tool results in a clear, human-readable format.`
     );
   }

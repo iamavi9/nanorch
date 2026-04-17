@@ -63,9 +63,10 @@ An orchestrator defines which AI provider and model your agents use, plus a shar
 1. Open a workspace → click **Orchestrators** in the sidebar → **New Orchestrator**
 2. Fill in:
    - **Name** — e.g. `Main Bot`
-   - **Provider** — OpenAI / Anthropic / Gemini / Ollama
-   - **Model** — pick from the dropdown (or type freely for Ollama)
-   - **Base URL** — Ollama only; e.g. `http://localhost:11434`
+   - **Provider** — OpenAI / Anthropic / Gemini / Ollama / vLLM
+   - **Model** — pick from the dropdown (or type freely for Ollama and vLLM)
+   - **Base URL** — Ollama and vLLM only; e.g. `http://localhost:11434` (Ollama) or `http://192.168.1.100:8000` (vLLM; do not include `/v1` — it is appended automatically)
+   - **vLLM API Key** — vLLM only; optional bearer token for your vLLM server; stored AES-256-GCM encrypted
    - **System Prompt** — instructions shared by all agents (e.g. `You are a helpful DevOps assistant.`)
    - **Temperature** — controls creativity (0 = deterministic, 100 = very creative)
    - **Max Tokens** — upper limit per response
@@ -224,7 +225,7 @@ curl -X POST https://<host>/api/channels/<channel-id>/webhook \
 
 ## 8. Adding integrations
 
-Integrations let agents call real AWS, GCP, Azure, Jira, GitHub, GitLab, RAGFlow, and messaging platform APIs.
+Integrations let agents call real AWS, GCP, Azure, Jira, GitHub, GitLab, RAGFlow, ServiceNow, messaging platform, and external PostgreSQL database APIs.
 
 1. Open a workspace → **Integrations** → **Add Integration**
 2. Select a provider from the dropdown and enter credentials:
@@ -260,6 +261,18 @@ ServiceNow integrations let agents open incidents, track RITMs, submit Change Re
 | **ServiceNow** | Instance URL (e.g. `https://your-instance.service-now.com`), Username, Password |
 
 > ServiceNow credentials must belong to a user with the **ITIL** role (for incidents/changes) and the **catalog** role (for RITM/catalog operations). The integration uses Basic Auth over HTTPS.
+
+### Database
+
+PostgreSQL integrations give agents read and write access to an external PostgreSQL database. Useful for querying analytics databases, internal data stores, or any Postgres-compatible data source from within a task.
+
+| Provider | Credentials needed |
+|---|---|
+| **PostgreSQL** | Connection String (e.g. `postgresql://user:password@host:5432/dbname`) |
+
+> The connection string is stored AES-256-GCM encrypted. The database must be reachable from the NanoOrch container (same VPC, open port 5432, or a connection string with SSL).
+
+**Safety:** `pg_execute` (write operations) requires **approval gate** sign-off by default before the agent can run INSERT/UPDATE/DELETE statements. `pg_query` is read-only (SELECT only) and does not require approval.
 
 ### Messaging
 
@@ -297,6 +310,7 @@ Click the **Edit** (pencil) button on any integration card to rename it, switch 
 | GitLab | `gitlab_list_projects`, `gitlab_list_issues`, `gitlab_get_issue`, `gitlab_create_issue`, `gitlab_list_merge_requests`, `gitlab_create_merge_request`, `gitlab_list_pipelines`, `gitlab_trigger_pipeline` |
 | RAGFlow | `ragflow_list_datasets`, `ragflow_query_dataset`, `ragflow_query_multiple_datasets` |
 | ServiceNow | `servicenow_search_records`, `servicenow_get_incident`, `servicenow_create_incident`, `servicenow_update_record`, `servicenow_add_work_note`, `servicenow_get_ritm`, `servicenow_create_ritm`, `servicenow_create_change_request`, `servicenow_get_catalog_items` |
+| PostgreSQL | `pg_list_schemas`, `pg_list_tables`, `pg_describe_table`, `pg_query` (read-only SELECT), `pg_execute` (write — requires approval gate) |
 | Teams | `teams_send_message` |
 | Slack | `slack_send_message`, `slack_send_notification` |
 | Google Chat | `google_chat_send_message`, `google_chat_send_card` |
@@ -596,7 +610,7 @@ Below the cards:
 1. Open a workspace → **Observability** in the sidebar
 2. Use the data to identify expensive agents, unexpected usage spikes, or opportunities to switch to cheaper models
 
-Costs are estimated using published provider pricing and update in real time as tasks complete. Ollama is shown as zero cost.
+Costs are estimated using published provider pricing and update in real time as tasks complete. Ollama and vLLM are shown as zero cost (self-hosted).
 
 ---
 
@@ -1001,6 +1015,48 @@ The MCP page shows all active keys with their name and last-used timestamp (the 
 
 ---
 
+## 21. Git Agents (repo-driven automation)
+
+Git Agents let you connect a Git repository to NanoOrch so that a `.nanoorch.yml` file in the repo drives agent automation on push, PR, and MR events — no webhook setup required.
+
+**Access:** Open a workspace → **Git Repos** in the sidebar
+
+### Connecting a repository
+
+1. Click **Add Repository**
+2. Fill in:
+   - **Repository URL** — the HTTPS clone URL of your GitHub or GitLab repo
+   - **Provider** — GitHub or GitLab
+   - **Access Token** — a personal access token with `repo` (GitHub) or `api` (GitLab) scope; stored AES-256-GCM encrypted
+   - **Branch** — default branch to poll (e.g. `main`)
+   - **Poll Interval** — how often NanoOrch checks for new events (in seconds; minimum 60)
+3. Click **Save**
+
+### The `.nanoorch.yml` file
+
+Add this file to the root of your repository:
+
+```yaml
+version: "1"
+agents:
+  - name: "Code Review Bot"
+    on: [pull_request, merge_request]
+    agent_id: "<agent-id-from-nanoorch>"
+    prompt: |
+      Review the diff and provide feedback on code quality, bugs, and best practices.
+      Repository: {{repo}} | Branch: {{branch}} | PR: {{title}} | Author: {{author}}
+```
+
+**Supported `on` events:** `push`, `pull_request` (GitHub), `merge_request` (GitLab)
+
+**Template variables available in prompts:** `{{repo}}`, `{{branch}}`, `{{event}}`, `{{title}}`, `{{author}}`, `{{sha}}`
+
+### Feedback comments
+
+After each agent task completes, NanoOrch posts the result as a Markdown comment on the PR/MR via the Git provider API. Comments appear automatically — no additional configuration needed.
+
+---
+
 ## Quick-start checklist
 
 - [ ] Log in as global admin
@@ -1023,5 +1079,8 @@ The MCP page shows all active keys with their name and last-used timestamp (the 
 - [ ] (Optional) Configure SSO — set `APP_URL`, add an OIDC or SAML provider at **SSO Settings**
 - [ ] (Optional) Set up Event Triggers — wire GitHub/GitLab/Jira webhooks to fire agent tasks
 - [ ] (Optional) Set up MCP Server — open **MCP** in the sidebar, create an API key, paste the config into Claude Desktop
+- [ ] (Optional) Set up Git Agents — open **Git Repos**, connect a repository, add `.nanoorch.yml` to the repo root
+- [ ] (Optional) Add a PostgreSQL integration — open **Integrations**, select PostgreSQL, paste a connection string, enable `pg_query` / `pg_execute` tools on an agent
+- [ ] (Optional) Use **vLLM** provider — start a vLLM server, create an orchestrator with provider = vLLM, enter base URL (no `/v1`) and optional API key
 - [ ] **Production:** Switch to Docker secrets — run `./secrets/create-secrets.sh` and use `docker-compose.secrets.yml`
 - [ ] **Production:** Enable `SANDBOX_RUNTIME=runsc`, `AGENT_RUNTIME=runsc`, and `SECCOMP_PROFILE` for full container hardening

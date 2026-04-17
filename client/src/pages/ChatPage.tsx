@@ -4,7 +4,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus, Send, Trash2, MessageSquare, Bot, User, Loader2, CheckCircle, XCircle, Terminal, ChevronDown, ChevronUp, AlertCircle, FileText, Code2, GitFork, Pencil, Check, X, Zap, ShieldCheck, ShieldAlert, ShieldOff, PlusCircle } from "lucide-react";
+import { Plus, Send, Trash2, MessageSquare, Bot, User, Loader2, CheckCircle, XCircle, Terminal, ChevronDown, ChevronUp, AlertCircle, FileText, Code2, GitFork, Pencil, Check, X, Zap, ShieldCheck, ShieldAlert, ShieldOff, PlusCircle, Brain, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ChatConversation, ChatMessage } from "@shared/schema";
 
@@ -24,6 +24,16 @@ type SubtaskState = {
   output: string;
 };
 
+export type ToolActivityItem = {
+  id: string;
+  type: "reasoning" | "tool_call";
+  toolName?: string;
+  reasoning?: string;
+  status: "running" | "done" | "error";
+  result?: string;
+  error?: string;
+};
+
 type StreamingMsg = {
   id: string;
   role: "streaming";
@@ -33,6 +43,7 @@ type StreamingMsg = {
   streaming: true;
   codeRunning?: string;
   subtasks: SubtaskState[];
+  toolActivity: ToolActivityItem[];
   conversationId: string;
   mentions: string[];
   messageType: "text";
@@ -158,6 +169,8 @@ export default function ChatPage({ workspaceId }: Props) {
   const [confirmStates, setConfirmStates] = useState<Map<string, ConfirmState>>(new Map());
   const [editingConvId, setEditingConvId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
+  const [convsOpen, setConvsOpen] = useState(true);
+  const [agentsOpen, setAgentsOpen] = useState(true);
 
   const { data: conversations = [], isLoading: convsLoading } = useQuery<ChatConversation[]>({
     queryKey: [`/api/workspaces/${workspaceId}/conversations`],
@@ -354,6 +367,7 @@ export default function ChatPage({ workspaceId }: Props) {
               content: "",
               streaming: true,
               subtasks: [],
+              toolActivity: [],
               conversationId: activeConvId,
               mentions: [],
               messageType: "text",
@@ -362,6 +376,38 @@ export default function ChatPage({ workspaceId }: Props) {
               bypassed: bypassed === true,
             };
             setDisplayMessages(prev => [...prev, placeholder]);
+          } else if (event.type === "reasoning") {
+            const { agentId, content } = event;
+            const item: ToolActivityItem = {
+              id: `r-${agentId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              type: "reasoning",
+              reasoning: content,
+              status: "done",
+            };
+            setDisplayMessages(prev => prev.map(m =>
+              m.id === `streaming-${agentId}` && m.role === "streaming"
+                ? { ...m, toolActivity: [...((m as StreamingMsg).toolActivity ?? []), item] }
+                : m
+            ));
+          } else if (event.type === "tool_call") {
+            const { agentId, toolName, callId } = event;
+            const item: ToolActivityItem = { id: callId, type: "tool_call", toolName, status: "running" };
+            setDisplayMessages(prev => prev.map(m =>
+              m.id === `streaming-${agentId}` && m.role === "streaming"
+                ? { ...m, toolActivity: [...((m as StreamingMsg).toolActivity ?? []), item] }
+                : m
+            ));
+          } else if (event.type === "tool_call_done") {
+            const { agentId, callId, result, error } = event;
+            setDisplayMessages(prev => prev.map(m => {
+              if (m.id !== `streaming-${agentId}` || m.role !== "streaming") return m;
+              const updated = ((m as StreamingMsg).toolActivity ?? []).map((item) =>
+                item.id === callId
+                  ? { ...item, status: (error ? "error" : "done") as "done" | "error", result: result ?? undefined, error: error ?? undefined }
+                  : item
+              );
+              return { ...m, toolActivity: updated };
+            }));
           } else if (event.type === "code_running") {
             const { agentId, language } = event;
             setDisplayMessages(prev => prev.map(m =>
@@ -560,8 +606,9 @@ export default function ChatPage({ workspaceId }: Props) {
 
   return (
     <div className="flex h-full overflow-hidden bg-background">
-      <div className="w-52 flex flex-col border-r shrink-0">
-        <div className="p-3 border-b">
+      <div className="w-52 flex flex-col border-r shrink-0 overflow-hidden">
+        {/* ── New Chat button ── */}
+        <div className="p-3 border-b shrink-0">
           <Button
             size="sm"
             variant="outline"
@@ -574,109 +621,144 @@ export default function ChatPage({ workspaceId }: Props) {
           </Button>
         </div>
 
-        <ScrollArea className="flex-1 py-1">
-          <div className="px-2 space-y-0.5">
-            {convsLoading && <p className="text-xs text-muted-foreground px-2 py-2">Loading…</p>}
-            {allConvs.map(conv => {
-              const isActive = activeConvId === conv.id;
-              const isEditing = editingConvId === conv.id;
-              return (
-                <div
-                  key={conv.id}
-                  className={cn(
-                    "flex items-center gap-1 px-2 py-1.5 rounded-md text-xs transition-colors cursor-pointer",
-                    isEditing
-                      ? "bg-accent/70"
-                      : isActive
-                        ? "bg-accent text-accent-foreground"
-                        : "text-muted-foreground hover:bg-accent/50"
-                  )}
-                  onClick={() => !isEditing && setActiveConvId(conv.id)}
-                  data-testid={`conv-item-${conv.id}`}
-                >
-                  <MessageSquare className="w-3 h-3 shrink-0 opacity-60" />
+        {/* ── Chats section (collapsible, takes remaining space when open) ── */}
+        <div className={cn("flex flex-col border-b", convsOpen ? "flex-1 min-h-0" : "shrink-0")}>
+          <button
+            className="w-full flex items-center justify-between px-3 py-2 text-[10px] font-semibold text-muted-foreground/50 uppercase tracking-wider hover:text-muted-foreground/80 transition-colors shrink-0"
+            onClick={() => setConvsOpen(v => !v)}
+            data-testid="toggle-chats-sidebar"
+          >
+            <span className="flex items-center gap-1">
+              <ChevronDown className={cn("w-2.5 h-2.5 transition-transform duration-150", convsOpen ? "" : "-rotate-90")} />
+              Chats
+            </span>
+            {allConvs.length > 0 && (
+              <span className="tabular-nums text-muted-foreground/40">{allConvs.length}</span>
+            )}
+          </button>
 
-                  {isEditing ? (
-                    /* ── Inline edit mode ── */
-                    <div className="flex items-center gap-1 flex-1 min-w-0" onClick={e => e.stopPropagation()}>
-                      <input
-                        autoFocus
-                        value={editingTitle}
-                        onChange={e => setEditingTitle(e.target.value)}
-                        onKeyDown={e => {
-                          if (e.key === "Enter") commitRename(conv.id);
-                          if (e.key === "Escape") setEditingConvId(null);
-                        }}
-                        onBlur={() => commitRename(conv.id)}
-                        className="flex-1 min-w-0 bg-transparent border-b border-primary outline-none text-xs text-foreground py-0.5"
-                        data-testid={`input-rename-conv-${conv.id}`}
-                      />
-                      <button
-                        onMouseDown={e => { e.preventDefault(); commitRename(conv.id); }}
-                        className="text-primary hover:text-primary/80 shrink-0"
-                        data-testid={`button-confirm-rename-${conv.id}`}
-                      >
-                        <Check className="w-3 h-3" />
-                      </button>
-                      <button
-                        onMouseDown={e => { e.preventDefault(); setEditingConvId(null); }}
-                        className="text-muted-foreground hover:text-foreground shrink-0"
-                        data-testid={`button-cancel-rename-${conv.id}`}
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </div>
-                  ) : (
-                    /* ── Normal display mode ── */
-                    <>
-                      <span className="truncate flex-1">{conv.title}</span>
-                      {/* Action buttons — always visible on the active item */}
-                      {isActive && (
-                        <div className="flex items-center gap-0.5 shrink-0 ml-1">
+          {convsOpen && (
+            <ScrollArea className="flex-1 py-1">
+              <div className="px-2 space-y-0.5">
+                {convsLoading && <p className="text-xs text-muted-foreground px-2 py-2">Loading…</p>}
+                {allConvs.map(conv => {
+                  const isActive = activeConvId === conv.id;
+                  const isEditing = editingConvId === conv.id;
+                  return (
+                    <div
+                      key={conv.id}
+                      className={cn(
+                        "flex items-center gap-1 px-2 py-1.5 rounded-md text-xs transition-colors cursor-pointer",
+                        isEditing
+                          ? "bg-accent/70"
+                          : isActive
+                            ? "bg-accent text-accent-foreground"
+                            : "text-muted-foreground hover:bg-accent/50"
+                      )}
+                      onClick={() => !isEditing && setActiveConvId(conv.id)}
+                      data-testid={`conv-item-${conv.id}`}
+                    >
+                      <MessageSquare className="w-3 h-3 shrink-0 opacity-60" />
+
+                      {isEditing ? (
+                        /* ── Inline edit mode ── */
+                        <div className="flex items-center gap-1 flex-1 min-w-0" onClick={e => e.stopPropagation()}>
+                          <input
+                            autoFocus
+                            value={editingTitle}
+                            onChange={e => setEditingTitle(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === "Enter") commitRename(conv.id);
+                              if (e.key === "Escape") setEditingConvId(null);
+                            }}
+                            onBlur={() => commitRename(conv.id)}
+                            className="flex-1 min-w-0 bg-transparent border-b border-primary outline-none text-xs text-foreground py-0.5"
+                            data-testid={`input-rename-conv-${conv.id}`}
+                          />
                           <button
-                            className="p-0.5 rounded hover:bg-accent-foreground/10 text-accent-foreground/70 hover:text-accent-foreground"
-                            onClick={e => startEditing(conv, e)}
-                            title="Rename"
-                            data-testid={`button-rename-conv-${conv.id}`}
+                            onMouseDown={e => { e.preventDefault(); commitRename(conv.id); }}
+                            className="text-primary hover:text-primary/80 shrink-0"
+                            data-testid={`button-confirm-rename-${conv.id}`}
                           >
-                            <Pencil className="w-3 h-3" />
+                            <Check className="w-3 h-3" />
                           </button>
                           <button
-                            className="p-0.5 rounded hover:bg-accent-foreground/10 text-accent-foreground/70 hover:text-destructive"
-                            onClick={e => { e.stopPropagation(); deleteConvMutation.mutate(conv.id); }}
-                            title="Delete"
-                            data-testid={`button-delete-conv-${conv.id}`}
+                            onMouseDown={e => { e.preventDefault(); setEditingConvId(null); }}
+                            className="text-muted-foreground hover:text-foreground shrink-0"
+                            data-testid={`button-cancel-rename-${conv.id}`}
                           >
-                            <Trash2 className="w-3 h-3" />
+                            <X className="w-3 h-3" />
                           </button>
                         </div>
+                      ) : (
+                        /* ── Normal display mode ── */
+                        <>
+                          <span className="truncate flex-1">{conv.title}</span>
+                          {isActive && (
+                            <div className="flex items-center gap-0.5 shrink-0 ml-1">
+                              <button
+                                className="p-0.5 rounded hover:bg-accent-foreground/10 text-accent-foreground/70 hover:text-accent-foreground"
+                                onClick={e => startEditing(conv, e)}
+                                title="Rename"
+                                data-testid={`button-rename-conv-${conv.id}`}
+                              >
+                                <Pencil className="w-3 h-3" />
+                              </button>
+                              <button
+                                className="p-0.5 rounded hover:bg-accent-foreground/10 text-accent-foreground/70 hover:text-destructive"
+                                onClick={e => { e.stopPropagation(); deleteConvMutation.mutate(conv.id); }}
+                                title="Delete"
+                                data-testid={`button-delete-conv-${conv.id}`}
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )}
+                        </>
                       )}
-                    </>
-                  )}
-                </div>
-              );
-            })}
-            {!convsLoading && allConvs.length === 0 && (
-              <p className="text-xs text-muted-foreground px-2 py-2">No conversations yet</p>
-            )}
-          </div>
-        </ScrollArea>
+                    </div>
+                  );
+                })}
+                {!convsLoading && allConvs.length === 0 && (
+                  <p className="text-xs text-muted-foreground px-2 py-2">No conversations yet</p>
+                )}
+              </div>
+            </ScrollArea>
+          )}
+        </div>
 
-        <div className="border-t p-3">
-          <div className="flex items-center justify-between mb-2">
-            <div className="text-[10px] font-semibold text-muted-foreground/50 uppercase tracking-wider">Agents</div>
+        {/* ── Agents section (collapsible, capped height with scroll when open) ── */}
+        <div className={cn(
+          "flex flex-col shrink-0",
+          agentsOpen && agents.length > 0 ? "max-h-[45%] min-h-0 overflow-hidden" : ""
+        )}>
+          <button
+            className="w-full flex items-center justify-between px-3 py-2 text-[10px] font-semibold text-muted-foreground/50 uppercase tracking-wider hover:text-muted-foreground/80 transition-colors"
+            onClick={() => setAgentsOpen(v => !v)}
+            data-testid="toggle-agents-sidebar"
+          >
+            <span className="flex items-center gap-1">
+              <ChevronDown className={cn("w-2.5 h-2.5 transition-transform duration-150", agentsOpen ? "" : "-rotate-90")} />
+              Agents
+            </span>
             {agents.length > 0 && (
-              <span className="text-[10px] text-muted-foreground/40 tabular-nums">{agents.length}</span>
+              <span className="tabular-nums text-muted-foreground/40">{agents.length}</span>
             )}
-          </div>
-          {agents.length === 0
-            ? <p className="text-xs text-muted-foreground/60">No agents</p>
-            : <AgentRoster agents={agents} onMention={quickMention} />
-          }
+          </button>
+
+          {agentsOpen && (
+            agents.length === 0
+              ? <p className="text-xs text-muted-foreground/60 px-3 pb-2">No agents</p>
+              : <ScrollArea className="flex-1 pb-2">
+                  <div className="px-3">
+                    <AgentRoster agents={agents} onMention={quickMention} />
+                  </div>
+                </ScrollArea>
+          )}
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
         <div className="h-14 border-b flex items-center px-5 gap-2 shrink-0">
           <MessageSquare className="w-4 h-4 text-primary" />
           <h1 className="font-semibold">Chat</h1>
@@ -1092,6 +1174,131 @@ function SubtaskPanel({ subtasks }: { subtasks: SubtaskState[] }) {
   );
 }
 
+function ThoughtProcess({
+  items,
+  isStreaming,
+}: {
+  items: ToolActivityItem[];
+  isStreaming: boolean;
+}) {
+  const [open, setOpen] = useState(isStreaming);
+  const hasActivity = items.length > 0;
+  const runningItem = items.find((i) => i.status === "running");
+
+  // Auto-open when activity arrives during streaming
+  useEffect(() => {
+    if (isStreaming && hasActivity) setOpen(true);
+  }, [isStreaming, hasActivity]);
+
+  // Auto-collapse when streaming completes
+  useEffect(() => {
+    if (!isStreaming) setOpen(false);
+  }, [isStreaming]);
+
+  if (!hasActivity && !isStreaming) return null;
+  if (!hasActivity && isStreaming) return null; // nothing yet
+
+  return (
+    <div className="w-full rounded-xl border border-border/60 overflow-hidden text-xs mt-1" data-testid="thought-process-panel">
+      {/* Header toggle */}
+      <button
+        className="w-full flex items-center gap-1.5 px-3 py-1.5 bg-muted/40 hover:bg-muted/70 text-muted-foreground font-medium transition-colors"
+        onClick={() => setOpen((o) => !o)}
+        data-testid="button-toggle-thought-process"
+      >
+        <Brain className="w-3 h-3 shrink-0 text-blue-400" />
+        <span className="flex-1 text-left">
+          {isStreaming && runningItem
+            ? <span className="flex items-center gap-1">
+                <Loader2 className="w-2.5 h-2.5 animate-spin inline" />
+                {runningItem.type === "tool_call"
+                  ? `Calling ${runningItem.toolName}…`
+                  : "Thinking…"
+                }
+              </span>
+            : isStreaming
+              ? <span className="animate-pulse">Processing…</span>
+              : `Thought process · ${items.length} step${items.length !== 1 ? "s" : ""}`
+          }
+        </span>
+        {open ? <ChevronUp className="w-3 h-3 shrink-0" /> : <ChevronDown className="w-3 h-3 shrink-0" />}
+      </button>
+
+      {open && (
+        <div className="divide-y divide-border/30 bg-background/50">
+          {items.map((item, idx) => (
+            <div key={item.id} className="px-3 py-2" data-testid={`thought-step-${idx}`}>
+              {item.type === "reasoning" ? (
+                <div className="flex gap-2 items-start">
+                  <Brain className="w-3 h-3 text-blue-400 shrink-0 mt-0.5" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[10px] font-semibold text-blue-400 uppercase tracking-wide mb-0.5">Reasoning</div>
+                    <p className="text-muted-foreground leading-relaxed whitespace-pre-wrap line-clamp-4">
+                      {item.reasoning}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <ToolCallRow item={item} />
+              )}
+            </div>
+          ))}
+          {isStreaming && !runningItem && (
+            <div className="px-3 py-2 flex items-center gap-1.5 text-muted-foreground/60">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              <span>Generating response…</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolCallRow({ item }: { item: ToolActivityItem }) {
+  const [open, setOpen] = useState(false);
+  const isRunning = item.status === "running";
+  const isError = item.status === "error";
+
+  return (
+    <div className="flex gap-2 items-start">
+      <div className="shrink-0 mt-0.5">
+        {isRunning
+          ? <Loader2 className="w-3 h-3 animate-spin text-orange-400" />
+          : isError
+            ? <XCircle className="w-3 h-3 text-red-400" />
+            : <CheckCircle className="w-3 h-3 text-green-400" />
+        }
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <Wrench className="w-2.5 h-2.5 text-orange-400 shrink-0" />
+          <span className="font-mono text-[10px] font-semibold text-orange-400">{item.toolName}</span>
+          {((item.result != null && item.result.length > 0) || item.error) && (
+            <button
+              onClick={() => setOpen((o) => !o)}
+              className="ml-auto text-[10px] text-muted-foreground hover:text-foreground"
+              data-testid={`button-toggle-tool-result-${item.id}`}
+            >
+              {open ? "hide" : "result"}
+            </button>
+          )}
+        </div>
+        {open && item.result && (
+          <div className="mt-1 rounded bg-muted/60 border border-border px-2 py-1.5 font-mono text-[10px] text-muted-foreground break-all whitespace-pre-wrap max-h-28 overflow-y-auto">
+            {item.result}
+          </div>
+        )}
+        {open && item.error && (
+          <div className="mt-1 rounded bg-red-500/5 border border-red-500/20 px-2 py-1.5 text-[10px] text-red-400 break-all">
+            {item.error}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function MessageBubble({ message, isTaskResult }: { message: DisplayMessage; isTaskResult?: boolean }) {
   const isUser = message.role === "user";
   const isStreaming = (message as StreamingMsg).streaming === true;
@@ -1101,6 +1308,12 @@ function MessageBubble({ message, isTaskResult }: { message: DisplayMessage; isT
   const agentName = (message as any).agentName as string | undefined;
   const meta = (message as any).metadata as Record<string, unknown> | undefined;
   const sources = (meta?.sources as SourceChunk[] | undefined) ?? [];
+  // Tool activity: live from StreamingMsg, or persisted in metadata for completed messages
+  const liveToolActivity = (message as StreamingMsg).toolActivity;
+  const toolActivity: ToolActivityItem[] = isStreaming
+    ? (liveToolActivity ?? [])
+    : ((meta?.toolActivity as ToolActivityItem[] | undefined) ?? []);
+  const hasThoughtProcess = toolActivity.length > 0;
 
   return (
     <div className={cn("flex gap-3", isUser ? "flex-row-reverse" : "flex-row")} data-testid={`message-${message.id}`}>
@@ -1171,6 +1384,11 @@ function MessageBubble({ message, isTaskResult }: { message: DisplayMessage; isT
             </span>
           )}
         </div>
+        {!isUser && hasThoughtProcess && (
+          <div className="w-full max-w-[90%]">
+            <ThoughtProcess items={toolActivity} isStreaming={isStreaming} />
+          </div>
+        )}
         {!isUser && sources.length > 0 && (
           <div className="w-full max-w-[90%]">
             <SourcesAccordion sources={sources} />

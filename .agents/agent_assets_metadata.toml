@@ -42,3 +42,21 @@ id = "dhgzVsogT5SRzu2BrsW-Z"
 uri = "file://NanoOrch_Brochure.pdf"
 type = "pdf"
 title = "NanoOrch Product Brochure — Cambridge (v3)"
+
+[[outputs]]
+id = "CZKPyLLzNtb4j3f1q-1W3"
+uri = "file://nanoorch-e2e-flow.png"
+type = "image"
+title = "NanoOrch — End-to-End Architecture Flow"
+
+[[outputs]]
+id = "mMdJGafJ-HGrrPfRyDep7"
+uri = "file://NanoOrch_Market_Report.xlsx"
+type = "table"
+title = "NanoOrch Market Report — Competitive Landscape & Valuation"
+
+[[outputs]]
+id = "LkXa7JPLTtL7wFX-wy8uU"
+uri = "file://NanoOrch_Market_Report.pdf"
+type = "pdf"
+title = "NanoOrch Market Report — Competitive Landscape & Valuation (PDF)"

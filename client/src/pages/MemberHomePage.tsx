@@ -60,7 +60,7 @@ export default function MemberHomePage() {
                 key={ws.id}
                 className="cursor-pointer hover:border-primary/50 transition-colors"
                 data-testid={`card-workspace-${ws.id}`}
-                onClick={() => navigate(`/chat/${ws.slug}`)}
+                onClick={() => navigate(`/chat/${ws.slug.trim().toLowerCase()}`)}
               >
                 <CardHeader className="pb-2 pt-4">
                   <div className="flex items-center justify-between">

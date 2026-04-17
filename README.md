@@ -1,6 +1,6 @@
 # NanoOrch — AI Agent Orchestrator Platform
 
-A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, Anthropic, Gemini, and **on-prem Ollama** — with 3-tier role-based access control, per-workspace resource limits, Docker-isolated task execution, real-time monitoring, approval gates, pipeline/DAG chaining, observability dashboards with utilization threshold alerts, scheduled jobs, **two-way Slack/Teams/Google Chat messaging** (inbound messages routed to agents, replies posted back to the thread), channel-based delivery for heartbeats/pipelines/jobs/triggers, outbound notifications, cloud integrations (AWS/GCP/Azure/Teams/Slack/Google Chat), DevTools integrations (Jira/GitHub/GitLab), RAGFlow knowledge base support, and a chat UI with `@agent` mentions.
+A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, Anthropic, Gemini, **on-prem Ollama**, and **vLLM (on-prem GPU clusters)** — with 3-tier role-based access control, per-workspace resource limits, Docker-isolated task execution, real-time monitoring, approval gates, pipeline/DAG chaining, observability dashboards with utilization threshold alerts, scheduled jobs, **two-way Slack/Teams/Google Chat messaging** (inbound messages routed to agents, replies posted back to the thread), channel-based delivery for heartbeats/pipelines/jobs/triggers, outbound notifications, cloud integrations (AWS/GCP/Azure/Teams/Slack/Google Chat), DevTools integrations (Jira/GitHub/GitLab), RAGFlow knowledge base support, and a chat UI with `@agent` mentions.
 
 ---
 
@@ -15,24 +15,27 @@ A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, 
 - **Task queue** — submit tasks via UI, webhook endpoint, API key channel, or scheduled job; real-time SSE log streaming
 - **Approval gates** — agents pause mid-task and require human sign-off before executing high-impact write operations; pending approvals appear in a dedicated sidebar section with live badge counts; in comms workspaces, interactive **Approve / Reject** cards are sent directly into the Slack thread (Block Kit) or Teams conversation (Adaptive Cards) so reviewers can approve without leaving the messaging app
 - **Pipeline / DAG chaining** — sequential multi-step pipelines where each step's output is passed as context to the next agent; supports cron scheduling and manual triggers with per-run step history
-- **Observability** — token usage and cost dashboard across all 4 providers; daily usage charts, per-agent breakdown, provider/model cost summaries; configurable per-workspace **utilization threshold alerts** dispatched to any outbound channel when rolling token usage crosses a set limit
+- **Observability** — token usage and cost dashboard across all 5 providers (OpenAI, Anthropic, Gemini, Ollama, vLLM); daily usage charts, per-agent breakdown, provider/model cost summaries; configurable per-workspace **utilization threshold alerts** dispatched to any outbound channel when rolling token usage crosses a set limit
 - **Event-driven triggers** — per-workspace webhooks that fire agent tasks on GitHub push/PR, GitLab push/merge, or Jira issue events; HMAC-SHA256 verified for GitHub/GitLab; payload template substitution `{{payload.field}}`; event history log per trigger
+- **Git Agents (repo-driven automation)** — connect GitHub/GitLab repos to a workspace; a `.nanoorch.yml` file in the repo root defines which agents run on push/PR/MR events; NanoOrch polls for changes, dispatches tasks, and posts AI feedback comments back to the PR/MR automatically
 - **Scheduled jobs** — cron-based agent automation with timezone support, preset schedules, manual trigger, and enable/disable toggle
 - **Two-way comms** — enable a workspace as a *comms workspace* to add Slack, Microsoft Teams, or Google Chat inbound channels; messages mention the bot or DM it → prompt routed to agent → reply posted back in the same thread; includes: DM allowlist (restrict access to specific user IDs), bypass phrases to skip approval gates, chat commands (`/status` `/reset` `/compact` `/help`), typing indicator, image-attachment notes, and conversation history (last 50 exchanges remembered per thread)
 - **Model failover** — configure a backup AI provider and model on each orchestrator; if the primary model fails, the executor automatically retries with the failover model; tasks also retry with exponential backoff (up to the orchestrator's `maxRetries` limit)
 - **Outbound notifications** — send task completion/failure alerts to Slack, Teams, Google Chat, or any generic webhook; delivery history per channel
-- **AI provider switcher** — OpenAI, Anthropic, Gemini, and Ollama (on-prem); swap per orchestrator
+- **AI provider switcher** — OpenAI, Anthropic, Gemini, Ollama (on-prem), and **vLLM** (self-hosted GPU clusters); swap per orchestrator; vLLM API key stored AES-256-GCM encrypted per orchestrator
 - **Docker-isolated execution** — action tasks run inside ephemeral containers; conversational tasks stay in-process
 - **Code execution** — agents write and run Python/JavaScript directly from chat inside a gVisor (`runsc`) sandbox container; fully network-isolated, read-only filesystem, memory/CPU capped
 - **Cloud integrations** — AWS, GCP, Azure with AES-256-GCM encrypted credentials and agentic tool calling; **messaging integrations** — MS Teams, Slack, Google Chat usable as agent tools (send messages, cards, notifications from any agent task)
 - **DevTools integrations** — Jira (7 tools: search/create/update issues, sprints, comments), GitHub (7 tools: repos, issues, PRs, Actions), GitLab (8 tools: issues, MRs, pipelines, triggers)
 - **ITSM integrations** — ServiceNow (9 tools: incidents, RITMs, change requests, Service Catalog orders, table search, work notes; Basic Auth with `instanceUrl` + `username` + `password`)
+- **Database integrations** — external PostgreSQL (5 tools: `pg_list_schemas`, `pg_list_tables`, `pg_describe_table`, `pg_query` read-only, `pg_execute` write with built-in approval gate); connection string stored AES-256-GCM encrypted
 - **RAGFlow integration** — query knowledge bases as a tool, or auto-inject context before every AI response (Context mode)
 - **Intent classification** — LLM-based classifier routes each message to action / code execution / conversational path automatically
 - **Chat UI** — per-workspace chat with `@agent` mention autocomplete (keyboard ↑↓ navigation, Enter/Tab to select) and live streaming responses
 - **MCP Server** — HTTP/SSE Model Context Protocol server at `/mcp`; workspace admins create API keys (`nano_mcp_...`) from the **MCP** page; 8 tools (`list_orchestrators`, `list_agents`, `run_task`, `get_task_status`, `list_pending_approvals`, `approve_request`, `trigger_pipeline`, `fire_scheduled_job`) let Claude Desktop or any MCP-compatible client remotely control the workspace
 - **Collapsible sidebar** — workspace sidebar collapses to a 60 px icon-only rail; icons are clickable with hover tooltips; preference persists in localStorage
 - **Member chat interface** — clean chat page at `/chat/:slug` for end-users (no admin UI visible)
+- **Public pricing page** — marketing page at `/pricing` (no login required) with OSS free tier vs. commercial plan comparison, monthly/annual billing toggle, FAQ, and CTA
 
 ---
 
@@ -896,6 +899,46 @@ Every webhook call is logged to the **Event History** tab on the Triggers page, 
 
 ---
 
+## Git Agents (Repo-Driven Automation)
+
+Git Agents connect a Git repository to NanoOrch so that a YAML file in the repo can define which agents run automatically on push, PR, or MR events — without any webhook setup.
+
+**Access:** Open a workspace → **Git Repos** in the sidebar
+
+### How it works
+
+1. Connect a GitHub or GitLab repository (with a personal access token)
+2. NanoOrch polls for new push/PR/MR events at a configurable interval
+3. When an event is detected, it matches against the rules in `.nanoorch.yml` (checked out from the repo)
+4. Matching agents are dispatched as tasks
+5. When the task completes, NanoOrch posts a structured Markdown feedback comment back to the PR/MR via the Git API
+
+### `.nanoorch.yml` format
+
+Place this file in the root of your repository:
+
+```yaml
+version: "1"
+agents:
+  - name: "Code Review Bot"
+    on: [pull_request, merge_request]
+    agent_id: "<agent-id-from-nanoorch>"
+    prompt: |
+      Review the following diff and provide feedback on code quality,
+      potential bugs, and adherence to best practices.
+      Repository: {{repo}}
+      Branch: {{branch}}
+      PR title: {{title}}
+```
+
+**Available template variables:** `{{repo}}`, `{{branch}}`, `{{event}}`, `{{title}}`, `{{author}}`, `{{sha}}`
+
+### Feedback comments
+
+After the agent task completes, NanoOrch automatically posts the result as a comment on the PR/MR. Comments are formatted as Markdown and powered by the NanoOrch Git Agent.
+
+---
+
 ## How Docker task isolation works
 
 When a user sends a message like `@agent list my Jira issues`, the flow:
@@ -1102,6 +1145,47 @@ Models like `mistral` 7B and `codellama` will respond conversationally but won't
 
 ---
 
+## vLLM (On-Prem GPU Cluster)
+
+vLLM lets you serve open-source models on your own GPU hardware using the [vLLM inference engine](https://github.com/vllm-project/vllm). NanoOrch talks to vLLM via its OpenAI-compatible REST API.
+
+### Setup
+
+1. Start a vLLM server on your GPU machine:
+   ```bash
+   vllm serve meta-llama/Llama-3-8b-instruct --port 8000
+   ```
+2. In NanoOrch, create an orchestrator → select **vLLM (on-prem GPU cluster)**
+3. Enter the **Base URL** (e.g. `http://192.168.1.100:8000`) — do **not** include `/v1`; NanoOrch appends it automatically
+4. Enter the **vLLM API Key** if your server requires a bearer token (optional; stored AES-256-GCM encrypted)
+5. Type the model name exactly as it appears in your vLLM server (e.g. `meta-llama/Llama-3-8b-instruct`)
+
+### On EC2
+
+If vLLM is running on the same EC2 instance as NanoOrch:
+```
+http://host.docker.internal:8000
+```
+
+If vLLM is on a separate GPU instance in the same VPC:
+```
+http://<private-ip>:8000
+```
+
+Make sure port 8000 is open in the security group between the two instances.
+
+### Tool calling support
+
+Tool calling works with models that support the OpenAI function-calling API format. Tested working with:
+- `meta-llama/Llama-3-8b-instruct`, `Llama-3-70b-instruct`
+- `mistralai/Mistral-7B-Instruct-v0.3`
+
+### K3s / Docker injection
+
+When using `DockerExecutor` or `K3sExecutor`, NanoOrch automatically injects `VLLM_API_KEY` and `VLLM_BASE_URL` into agent containers so sandbox runners can call the vLLM server directly.
+
+---
+
 ## Code Execution (Sandbox)
 
 Agents can write and run Python or JavaScript **directly from the chat** without any extra setup from the user. The code runs inside an isolated sandbox and the output streams back inline.
@@ -1240,7 +1324,7 @@ The **Observability** page (workspace sidebar) shows token usage and cost analyt
 | Per-agent breakdown | Which agents consumed the most tokens |
 | Provider/model summary | Cost breakdown by AI provider and model |
 
-Costs are estimated based on published provider pricing. Ollama is treated as zero-cost (self-hosted).
+Costs are estimated based on published provider pricing. Ollama and vLLM are treated as zero-cost (self-hosted).
 
 ---
 

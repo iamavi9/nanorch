@@ -5,12 +5,13 @@ import {
   Bot, LayoutDashboard, Network, Radio, ListTodo, ChevronLeft,
   Moon, Sun, Zap, Plug, MessageSquare, Users, LogOut, Clock,
   ShieldAlert, GitBranch, BarChart2, Webhook, PanelLeftClose, PanelLeftOpen,
+  GitFork, GitPullRequest,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useTheme } from "./ThemeProvider";
-import { APP_NAME } from "@/lib/config";
 import { useAuth, useLogout } from "@/hooks/useAuth";
+import { useBranding } from "@/hooks/useBranding";
 import type { Workspace, Orchestrator } from "@shared/schema";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -33,6 +34,7 @@ export default function AppLayout({ workspaceId, children }: AppLayoutProps) {
   const [location] = useLocation();
   const { user } = useAuth();
   const logout = useLogout();
+  const branding = useBranding();
 
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
@@ -73,6 +75,8 @@ export default function AppLayout({ workspaceId, children }: AppLayoutProps) {
     { label: "Scheduled Jobs", icon: Clock,           path: `${basePath}/scheduled-jobs` },
     { label: "Pipelines",      icon: GitBranch,       path: `${basePath}/pipelines`,     badge: null },
     { label: "Triggers",       icon: Webhook,         path: `${basePath}/triggers`,      badge: null },
+    { label: "Git Agents",     icon: GitPullRequest,  path: `${basePath}/git-agents`,    badge: null },
+    { label: "Git Repos",      icon: GitFork,         path: `${basePath}/git-repos`,     badge: null },
     { label: "Approvals",      icon: ShieldAlert,     path: `${basePath}/approvals`,     badge: pendingApprovals > 0 ? pendingApprovals : null },
     { label: "Observability",  icon: BarChart2,       path: `${basePath}/observability`, badge: null },
   ];
@@ -137,12 +141,15 @@ export default function AppLayout({ workspaceId, children }: AppLayoutProps) {
             "h-14 flex items-center border-b border-sidebar-border shrink-0",
             collapsed ? "justify-center px-2" : "gap-2 px-4"
           )}>
-            <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center shrink-0">
-              <Zap className="w-4 h-4 text-white" />
+            <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center shrink-0 overflow-hidden">
+              {branding.appLogoUrl
+                ? <img src={branding.appLogoUrl} alt={branding.appName} className="w-8 h-8 object-cover rounded-lg" />
+                : <Zap className="w-4 h-4 text-white" />
+              }
             </div>
             {!collapsed && (
               <div className="min-w-0 flex-1">
-                <div className="text-xs font-semibold text-sidebar-foreground/60 uppercase tracking-wider truncate">{APP_NAME}</div>
+                <div className="text-xs font-semibold text-sidebar-foreground/60 uppercase tracking-wider truncate">{branding.appName}</div>
                 <div className="text-sm font-semibold truncate">{workspace?.name ?? "Loading..."}</div>
               </div>
             )}

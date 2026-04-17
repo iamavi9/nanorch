@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { useAuth, useLogout } from "@/hooks/useAuth";
 import { APP_NAME } from "@/lib/config";
 import { Bot, LogOut, ChevronLeft } from "lucide-react";
@@ -25,6 +26,13 @@ export default function MemberChatPage({ slug }: MemberChatPageProps) {
     },
   });
 
+  useEffect(() => {
+    if (!isLoading && (isError || !workspace)) {
+      const t = setTimeout(() => navigate("/member"), 3000);
+      return () => clearTimeout(t);
+    }
+  }, [isLoading, isError, workspace, navigate]);
+
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
@@ -36,16 +44,17 @@ export default function MemberChatPage({ slug }: MemberChatPageProps) {
   if (isError || !workspace) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="text-center space-y-2">
-          <p className="text-muted-foreground">Workspace not found.</p>
-          <Button variant="ghost" size="sm" onClick={() => navigate("/member")}>Go back</Button>
+        <div className="text-center space-y-3">
+          <p className="text-muted-foreground text-sm">Workspace not found.</p>
+          <p className="text-xs text-muted-foreground/60">Redirecting you back…</p>
+          <Button variant="ghost" size="sm" onClick={() => navigate("/member")}>Go back now</Button>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-background">
+    <div className="h-screen flex flex-col bg-background overflow-hidden">
       <header className="border-b px-4 py-2.5 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
           <Button
@@ -77,7 +86,7 @@ export default function MemberChatPage({ slug }: MemberChatPageProps) {
           </Button>
         </div>
       </header>
-      <div className="flex-1 overflow-hidden">
+      <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
         <ChatPage workspaceId={workspace.id} />
       </div>
     </div>

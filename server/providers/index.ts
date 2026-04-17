@@ -1,4 +1,4 @@
-export type Provider = "openai" | "anthropic" | "gemini" | "ollama";
+export type Provider = "openai" | "anthropic" | "gemini" | "ollama" | "vllm";
 
 export interface ProviderMessage {
   role: "user" | "assistant" | "system";
@@ -25,6 +25,7 @@ export interface RunAgentOptions {
   provider: Provider;
   model: string;
   baseUrl?: string | null;
+  apiKey?: string | null;
   systemPrompt?: string | null;
   messages: ProviderMessage[];
   maxTokens?: number;
@@ -71,6 +72,16 @@ export const PROVIDER_MODELS: Record<Provider, ProviderModelInfo[]> = {
     { id: "codellama", name: "Code Llama", description: "Code-focused Llama model" },
     { id: "deepseek-r1", name: "DeepSeek R1", description: "DeepSeek reasoning model" },
   ],
+  vllm: [
+    { id: "meta-llama/Llama-3.1-70B-Instruct", name: "Llama 3.1 70B Instruct", description: "Meta's Llama 3.1 70B — strong reasoning & tool calling" },
+    { id: "meta-llama/Llama-3.1-8B-Instruct", name: "Llama 3.1 8B Instruct", description: "Meta's Llama 3.1 8B — fast, lightweight" },
+    { id: "Qwen/Qwen2.5-72B-Instruct", name: "Qwen 2.5 72B Instruct", description: "Alibaba Qwen 2.5 72B — strong coding & tool calling" },
+    { id: "Qwen/Qwen2.5-7B-Instruct", name: "Qwen 2.5 7B Instruct", description: "Alibaba Qwen 2.5 7B — efficient" },
+    { id: "mistralai/Mixtral-8x7B-Instruct-v0.1", name: "Mixtral 8x7B Instruct", description: "Mistral MoE model — high throughput" },
+    { id: "mistralai/Mistral-Large-Instruct-2407", name: "Mistral Large Instruct", description: "Mistral's flagship model" },
+    { id: "deepseek-ai/DeepSeek-V3", name: "DeepSeek V3", description: "DeepSeek V3 — strong reasoning" },
+    { id: "microsoft/Phi-4", name: "Phi-4", description: "Microsoft Phi-4 — compact, high capability" },
+  ],
 };
 
 export async function runAgent(options: RunAgentOptions): Promise<RunAgentResult> {
@@ -90,6 +101,10 @@ export async function runAgent(options: RunAgentOptions): Promise<RunAgentResult
     case "ollama": {
       const { runOllama } = await import("./ollama");
       return runOllama(options);
+    }
+    case "vllm": {
+      const { runVllm } = await import("./vllm");
+      return runVllm(options);
     }
     default:
       throw new Error(`Unknown provider: ${options.provider}`);

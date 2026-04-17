@@ -20,7 +20,9 @@ import { taskLogEmitter } from "./emitter";
 import { executeCloudTool } from "../cloud/executor";
 import { detectProviderFromToolName } from "../cloud/tools";
 import { sanitizeToolArgs } from "../lib/mountAllowlist";
-import { issueTaskToken, revokeTaskToken } from "../proxy/inference-proxy";
+import { issueTaskToken, revokeTaskToken, getAndClearProxiedUsage } from "../proxy/inference-proxy";
+import { generateEmbedding } from "../lib/embeddings";
+import { estimateTokenCost } from "./token-cost";
 import { loadCloudCredentials, buildToolList, buildSystemPrompt } from "./agent-helpers";
 import type { ProviderMessage } from "../providers";
 import type { Orchestrator, Agent } from "@shared/schema";
@@ -113,6 +115,17 @@ export async function executeTaskInK3s(taskId: string): Promise<void> {
 
   const taskToken = issueTaskToken(taskId);
 
+  // Decrypt vLLM API key if applicable (self-hosted inference server — not proxied).
+  let vllmApiKey: string | null = null;
+  if (orchestrator.provider === "vllm" && (orchestrator as any).vllmApiKey) {
+    try {
+      const { decrypt } = await import("../lib/encryption");
+      vllmApiKey = decrypt((orchestrator as any).vllmApiKey);
+    } catch {
+      // Proceed without key if decryption fails
+    }
+  }
+
   try {
     await log("info", `Task started in K3s sandbox — provider: ${orchestrator.provider}, model: ${orchestrator.model}`);
     await log("info", "K3s mode: agent pods are network-isolated, credentials are never exposed to containers");
@@ -131,6 +144,19 @@ export async function executeTaskInK3s(taskId: string): Promise<void> {
       if (memory.length > 0) {
         const memStr = memory.map((m) => `${m.key}: ${m.value}`).join("\n");
         messages.push({ role: "system", content: `Agent memory:\n${memStr}` });
+      }
+      try {
+        const queryEmb = await generateEmbedding(task.input);
+        if (queryEmb) {
+          const vecMems = await storage.retrieveVectorMemories(agent.id, orchestrator.workspaceId, queryEmb, 5);
+          const relevant = vecMems.filter((m) => m.similarity >= 0.70);
+          if (relevant.length > 0) {
+            const memStr = relevant.map((m, i) => `${i + 1}. [${m.source}] ${m.content}`).join("\n\n");
+            messages.push({ role: "system", content: `Relevant memories from past tasks:\n${memStr}` });
+            await log("info", `Vector memory: ${relevant.length} relevant entr${relevant.length === 1 ? "y" : "ies"} injected`);
+          }
+        }
+      } catch {
       }
     }
 
@@ -153,6 +179,7 @@ export async function executeTaskInK3s(taskId: string): Promise<void> {
         messages,
         tools: availableTools,
         taskToken,
+        vllmApiKey,
         log,
       });
 
@@ -217,6 +244,7 @@ export async function executeTaskInK3s(taskId: string): Promise<void> {
         messages: [...messages, { role: "user", content: "Please provide your final answer based on the tool results above." }],
         tools: [],
         taskToken,
+        vllmApiKey,
         log,
       });
       if (finalResult.type === "result") {
@@ -227,15 +255,42 @@ export async function executeTaskInK3s(taskId: string): Promise<void> {
 
     await log("info", `Task completed in K3s sandbox — output length: ${output.length} chars`);
 
+    // Record token usage captured by the inference proxy for this task.
+    const proxiedUsage = getAndClearProxiedUsage(taskId);
+    if (proxiedUsage && (proxiedUsage.inputTokens > 0 || proxiedUsage.outputTokens > 0)) {
+      const costUsd = estimateTokenCost(orchestrator.provider, orchestrator.model, proxiedUsage.inputTokens, proxiedUsage.outputTokens);
+      storage.createTokenUsage({
+        workspaceId: orchestrator.workspaceId,
+        taskId,
+        agentId:   agent?.id   ?? null,
+        agentName: agent?.name || `${orchestrator.name} (direct)`,
+        provider:  orchestrator.provider,
+        model:     orchestrator.model,
+        inputTokens:      proxiedUsage.inputTokens,
+        outputTokens:     proxiedUsage.outputTokens,
+        estimatedCostUsd: costUsd,
+      }).catch(console.error);
+      await log("info", `Token usage: ${proxiedUsage.inputTokens} in / ${proxiedUsage.outputTokens} out (~$${costUsd.toFixed(6)})`);
+    }
+
     if (agent?.memoryEnabled && agent) {
-      await storage.setAgentMemory(agent.id, `last_output_${Date.now()}`, output.slice(0, 500));
+      await storage.setAgentMemory(agent.id, "last_task_output", output.slice(0, 500));
+      generateEmbedding(output.slice(0, 4000))
+        .then((emb) => {
+          if (emb) {
+            storage.storeVectorMemory(agent.id, orchestrator.workspaceId, output, emb, "task_output", taskId).catch(() => {});
+          }
+        })
+        .catch(() => {});
     }
 
     await storage.updateTask(taskId, { status: "completed", output, completedAt: new Date() });
+    taskLogEmitter.emit(`task:${taskId}`, { type: "done", status: "completed" });
   } catch (err: any) {
     const message = err?.message ?? String(err);
     await log("error", `Task failed in K3s sandbox: ${message}`);
     await storage.updateTask(taskId, { status: "failed", errorMessage: message, completedAt: new Date() });
+    taskLogEmitter.emit(`task:${taskId}`, { type: "done", status: "failed" });
   } finally {
     revokeTaskToken(taskId);
   }
@@ -254,9 +309,10 @@ async function runInK3sJob(opts: {
   messages: ProviderMessage[];
   tools: ReturnType<typeof buildToolList>;
   taskToken: string;
+  vllmApiKey: string | null;
   log: (level: "info" | "warn" | "error", msg: string) => Promise<void>;
 }): Promise<ContainerResult> {
-  const { taskId, round, orchestrator, agent, systemPrompt, messages, tools, taskToken, log } = opts;
+  const { taskId, round, orchestrator, agent, systemPrompt, messages, tools, taskToken, vllmApiKey, log } = opts;
 
   const jobName = `nanoorch-agent-${taskId.slice(0, 8)}-r${round}`;
 
@@ -278,6 +334,11 @@ async function runInK3sJob(opts: {
     { name: "ANTHROPIC_BASE_URL",      value: `${K3S_PROXY_URL}/anthropic` },
     { name: "GEMINI_API_KEY",          value: taskToken },
     { name: "GEMINI_BASE_URL",         value: `${K3S_PROXY_URL}/gemini` },
+    // vLLM: direct connection to the self-hosted inference server (bypasses the proxy).
+    ...(orchestrator.provider === "vllm" ? [
+      { name: "VLLM_API_KEY",  value: vllmApiKey || "vllm" },
+      { name: "VLLM_BASE_URL", value: `${((orchestrator as any).baseUrl ?? "http://localhost:8000").replace(/\/$/, "")}/v1` },
+    ] : []),
   ];
 
   const envYaml = envEntries
@@ -450,6 +511,9 @@ function streamJobLogs(
 
         if (parsed.type === "log") {
           await log(parsed.level ?? "info", `[k3s-pod] ${parsed.message}`);
+        } else if (parsed.type === "token") {
+          // Relay streaming tokens to the SSE endpoint — not persisted to DB.
+          taskLogEmitter.emit(`task:${taskId}:token`, parsed.content ?? "");
         } else if (parsed.type === "result") {
           result = { type: "result", output: parsed.output ?? "" };
         } else if (parsed.type === "tool_calls") {

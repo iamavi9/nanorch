@@ -13,35 +13,30 @@ import { runCode } from "./sandbox-executor";
 import { dispatchNotification, dispatchToChannel } from "./notifier";
 import { dispatchCommsReply } from "../comms/comms-reply";
 import { dispatchApprovalCard } from "../comms/approval-cards";
-
-function estimateTokenCost(provider: string, model: string, inputTokens: number, outputTokens: number): number {
-  const pricing: Record<string, { input: number; output: number }> = {
-    "openai:gpt-5.4": { input: 2.50, output: 15.00 },
-    "openai:gpt-5.4-mini": { input: 0.75, output: 4.50 },
-    "openai:gpt-5.4-nano": { input: 0.15, output: 0.60 },
-    "anthropic:claude-opus-4-6": { input: 15.00, output: 75.00 },
-    "anthropic:claude-sonnet-4-6": { input: 3.00, output: 15.00 },
-    "anthropic:claude-haiku-4-5-20251001": { input: 0.25, output: 1.25 },
-    "gemini:gemini-3.1-pro-preview": { input: 1.25, output: 10.00 },
-    "gemini:gemini-3-flash-preview": { input: 0.10, output: 0.40 },
-    "gemini:gemini-3.1-flash-lite-preview": { input: 0.04, output: 0.15 },
-    "gemini:gemini-2.5-pro": { input: 1.25, output: 5.00 },
-    "gemini:gemini-2.5-flash": { input: 0.075, output: 0.30 },
-  };
-  const rates = pricing[`${provider}:${model}`] ?? { input: 1.00, output: 3.00 };
-  return (inputTokens * rates.input + outputTokens * rates.output) / 1_000_000;
-}
+import { generateEmbedding } from "../lib/embeddings";
+import { estimateTokenCost } from "./token-cost";
 
 async function runAgentWithFailover(
   orchestrator: Orchestrator,
-  options: Omit<Parameters<typeof runAgent>[0], "provider" | "model" | "baseUrl">,
+  options: Omit<Parameters<typeof runAgent>[0], "provider" | "model" | "baseUrl" | "apiKey">,
   log: (level: "info" | "warn" | "error", msg: string) => Promise<void>,
 ): Promise<Awaited<ReturnType<typeof runAgent>>> {
+  let primaryApiKey: string | null = null;
+  if (orchestrator.provider === "vllm" && (orchestrator as any).vllmApiKey) {
+    try {
+      const { decrypt } = await import("../lib/encryption");
+      primaryApiKey = decrypt((orchestrator as any).vllmApiKey);
+    } catch {
+      // If decryption fails (key changed), proceed without API key
+    }
+  }
+
   try {
     return await runAgent({
       provider: orchestrator.provider,
       model: orchestrator.model,
       baseUrl: orchestrator.baseUrl,
+      apiKey: primaryApiKey,
       ...options,
     });
   } catch (primaryErr: any) {
@@ -64,10 +59,11 @@ export async function executeTask(taskId: string): Promise<void> {
   const task = await storage.getTask(taskId);
   if (!task) throw new Error(`Task ${taskId} not found`);
 
-  if (isK3sAvailable() && task.intent === "action") {
+  const needsSandbox = task.intent === "action" || (task.intent?.startsWith("git-agent:") ?? false);
+  if (isK3sAvailable() && needsSandbox) {
     return executeTaskInK3s(taskId);
   }
-  if (isDockerAvailable() && task.intent === "action") {
+  if (isDockerAvailable() && needsSandbox) {
     return executeTaskInDocker(taskId);
   }
 
@@ -118,6 +114,19 @@ export async function executeTask(taskId: string): Promise<void> {
       if (memory.length > 0) {
         const memStr = memory.map((m) => `${m.key}: ${m.value}`).join("\n");
         messages.push({ role: "system", content: `Agent memory:\n${memStr}` });
+      }
+      try {
+        const queryEmb = await generateEmbedding(task.input);
+        if (queryEmb) {
+          const vecMems = await storage.retrieveVectorMemories(agent.id, orchestrator.workspaceId, queryEmb, 5);
+          const relevant = vecMems.filter((m) => m.similarity >= 0.70);
+          if (relevant.length > 0) {
+            const memStr = relevant.map((m, i) => `${i + 1}. [${m.source}] ${m.content}`).join("\n\n");
+            messages.push({ role: "system", content: `Relevant memories from past tasks:\n${memStr}` });
+            await log("info", `Vector memory: ${relevant.length} relevant entr${relevant.length === 1 ? "y" : "ies"} injected`);
+          }
+        }
+      } catch {
       }
     }
 
@@ -344,7 +353,14 @@ export async function executeTask(taskId: string): Promise<void> {
     await log("info", `Task completed — output length: ${output.length} chars${approvalRequested ? " (approval pending)" : ""}`);
 
     if (agent?.memoryEnabled && agent) {
-      await storage.setAgentMemory(agent.id, `last_output_${Date.now()}`, output.slice(0, 500));
+      await storage.setAgentMemory(agent.id, "last_task_output", output.slice(0, 500));
+      generateEmbedding(output.slice(0, 4000))
+        .then((emb) => {
+          if (emb) {
+            storage.storeVectorMemory(agent.id, orchestrator.workspaceId, output, emb, "task_output", taskId).catch(() => {});
+          }
+        })
+        .catch(() => {});
     }
 
     await storage.updateTask(taskId, {
@@ -352,6 +368,7 @@ export async function executeTask(taskId: string): Promise<void> {
       output,
       completedAt: new Date(),
     });
+    taskLogEmitter.emit(`task:${taskId}`, { type: "done", status: "completed" });
 
     if (commsThread) {
       storage.appendCommsThreadHistory(commsThread.id, { role: "user", content: task.input }).catch(console.error);
@@ -364,7 +381,7 @@ export async function executeTask(taskId: string): Promise<void> {
         workspaceId: orchestrator.workspaceId,
         taskId,
         agentId: agent?.id ?? null,
-        agentName: agent?.name ?? `${orchestrator.name} (direct)`,
+        agentName: agent?.name || `${orchestrator.name} (direct)`,
         provider: orchestrator.provider,
         model: orchestrator.model,
         inputTokens: totalInputTokens,
@@ -448,6 +465,7 @@ export async function executeTask(taskId: string): Promise<void> {
         errorMessage: `${message} (retrying...)`,
         completedAt: new Date(),
       });
+      taskLogEmitter.emit(`task:${taskId}`, { type: "done", status: "failed" });
       setTimeout(async () => {
         try {
           const retryTask = await storage.createTask({
@@ -474,6 +492,7 @@ export async function executeTask(taskId: string): Promise<void> {
         errorMessage: message,
         completedAt: new Date(),
       });
+      taskLogEmitter.emit(`task:${taskId}`, { type: "done", status: "failed" });
       dispatchNotification(orchestrator.id, "task.failed", {
         taskId,
         agentName: agent?.name,
@@ -591,6 +610,25 @@ async function loadCloudCredentials(
             password: raw.password,
           },
         });
+      } else if (integration.provider === "postgresql") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "postgresql",
+          credentials: { connectionString: raw.connectionString },
+        });
+      } else if (integration.provider === "kubernetes") {
+        loaded.push({
+          integrationId: integration.id,
+          provider: "kubernetes",
+          credentials: {
+            apiServer: raw.apiServer,
+            bearerToken: raw.bearerToken,
+            caCertBase64: raw.caCertBase64,
+            insecureSkipTlsVerify: raw.insecureSkipTlsVerify,
+            kubeconfigJson: raw.kubeconfigJson,
+            defaultNamespace: raw.defaultNamespace,
+          },
+        });
       }
     } catch {
       await log("warn", `Failed to load credentials for integration "${integration.name}" — skipping`);
@@ -627,9 +665,9 @@ function buildSystemPrompt(orchestrator: Orchestrator, agent: Agent | null, hasC
 
   if (hasCloudTools) {
     parts.push(
-      `You have access to tools for cloud providers and developer platforms (AWS, GCP, Azure, RAGFlow, Jira, GitHub, GitLab). ` +
-      `When the user asks about resources or operations on any of these platforms, use the appropriate tool to fetch real data. ` +
-      `Always summarize tool results in a clear, human-readable format.`
+      `You have access to tools for cloud providers, developer platforms, messaging services, ITSM, databases, and Kubernetes (AWS, GCP, Azure, RAGFlow, Jira, GitHub, GitLab, MS Teams, Slack, Google Chat, ServiceNow, PostgreSQL, Kubernetes). ` +
+      `When the user asks about resources or operations on any of these platforms, use the appropriate tool to fetch real data, send messages, query databases, or manage cluster workloads. ` +
+      `For Kubernetes: use kube_* tools to inspect pods, deployments, services, configs, storage, jobs, and cluster state. Use kube_apply_manifest and kube_scale_deployment for write operations. Always summarize tool results in a clear, human-readable format.`
     );
   }
 
@@ -645,6 +683,19 @@ function buildSystemPrompt(orchestrator: Orchestrator, agent: Agent | null, hasC
         `Available agents for delegation:\n${agentList}`
       );
     }
+  }
+
+  if (agent?.reactEnabled) {
+    parts.push(
+      `Reasoning Protocol — you MUST follow this for every step:\n` +
+      `1. Before each tool call write a THOUGHT block:\n` +
+      `   Thought: <current goal> | <what you know so far> | <why this specific action next> | <what you expect to find>\n` +
+      `2. After receiving a tool result write an OBSERVE block:\n` +
+      `   Observe: <what the result tells you> | <does it change your plan?>\n` +
+      `3. Repeat until the goal is achieved.\n` +
+      `4. End with a final Thought confirming the goal was fully achieved or stating what is still missing.\n` +
+      `Keep THOUGHT and OBSERVE blocks concise (1–3 sentences each). Never skip them.`
+    );
   }
 
   if (parts.length === 0) {

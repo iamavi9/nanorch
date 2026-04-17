@@ -2,15 +2,15 @@ import OpenAI from "openai";
 import { loadSecret } from "../lib/secrets";
 import type { RunAgentOptions, RunAgentResult, ToolCall } from "./index";
 
-function getClient() {
+function getClient(apiKey?: string | null, baseUrl?: string | null) {
   return new OpenAI({
-    apiKey: loadSecret("AI_INTEGRATIONS_OPENAI_API_KEY"),
-    baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+    apiKey: apiKey ?? loadSecret("AI_INTEGRATIONS_OPENAI_API_KEY"),
+    baseURL: baseUrl ?? process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
   });
 }
 
 export async function runOpenAI(options: RunAgentOptions): Promise<RunAgentResult> {
-  const openai = getClient();
+  const openai = getClient(options.apiKey, options.baseUrl);
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
 
   if (options.systemPrompt) {

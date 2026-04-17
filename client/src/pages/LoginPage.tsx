@@ -35,6 +35,12 @@ export default function LoginPage() {
     onSuccess: (user) => {
       if (user.csrfToken) setCsrfToken(user.csrfToken);
       queryClient.setQueryData(["/api/auth/me"], user);
+      const redirectParam = new URLSearchParams(window.location.search).get("redirect");
+      // Only follow redirect if it's a relative path (prevents open redirect)
+      if (redirectParam && redirectParam.startsWith("/")) {
+        navigate(redirectParam);
+        return;
+      }
       if (user.role === "admin" || (user.workspaceAdminIds && user.workspaceAdminIds.length > 0)) {
         navigate("/workspaces");
       } else {

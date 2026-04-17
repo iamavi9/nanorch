@@ -23,18 +23,26 @@ import ObservabilityPage from "@/pages/ObservabilityPage";
 import MemberHomePage from "@/pages/MemberHomePage";
 import MemberChatPage from "@/pages/MemberChatPage";
 import AppLayout from "@/components/AppLayout";
+import AdminLayout from "@/components/AdminLayout";
 import SSOPage from "@/pages/SSOPage";
+import BrandingPage from "@/pages/BrandingPage";
 import TriggersPage from "@/pages/TriggersPage";
 import McpPage from "@/pages/McpPage";
+import GitAgentsPage from "@/pages/GitAgentsPage";
+import GitReposPage from "@/pages/GitReposPage";
+import PricingPage from "@/pages/PricingPage";
+import ProviderKeysPage from "@/pages/ProviderKeysPage";
 import { useAuth } from "@/hooks/useAuth";
 
 function AuthGuard({
   children,
   adminOnly = false,
+  superAdminOnly = false,
   workspaceId,
 }: {
   children: React.ReactNode;
   adminOnly?: boolean;
+  superAdminOnly?: boolean;
   workspaceId?: string;
 }) {
   const { user, isLoading, isWorkspaceAdmin, isAnyWorkspaceAdmin } = useAuth();
@@ -52,7 +60,11 @@ function AuthGuard({
     return <Redirect to={`/login?redirect=${encodeURIComponent(location)}`} />;
   }
 
-  if (adminOnly) {
+  if (superAdminOnly) {
+    if (user.role !== "admin") {
+      return <Redirect to={isAnyWorkspaceAdmin ? "/workspaces" : "/member"} />;
+    }
+  } else if (adminOnly) {
     if (workspaceId) {
       if (!isWorkspaceAdmin(workspaceId)) {
         return <Redirect to="/member" />;
@@ -81,6 +93,7 @@ function Router() {
     <Switch>
       <Route path="/" component={RootRedirect} />
       <Route path="/login" component={LoginPage} />
+      <Route path="/pricing" component={PricingPage} />
 
       {/* Member routes */}
       <Route path="/member">
@@ -237,11 +250,53 @@ function Router() {
           </AuthGuard>
         )}
       </Route>
+      <Route path="/workspaces/:wid/git-agents">
+        {(params) => (
+          <AuthGuard adminOnly workspaceId={params.wid}>
+            <AppLayout workspaceId={params.wid}>
+              <GitAgentsPage workspaceId={params.wid} />
+            </AppLayout>
+          </AuthGuard>
+        )}
+      </Route>
+      <Route path="/workspaces/:wid/git-repos">
+        {(params) => (
+          <AuthGuard adminOnly workspaceId={params.wid}>
+            <AppLayout workspaceId={params.wid}>
+              <GitReposPage workspaceId={params.wid} />
+            </AppLayout>
+          </AuthGuard>
+        )}
+      </Route>
 
-      {/* Global admin routes */}
+      {/* Global super-admin-only routes */}
       <Route path="/admin/sso">
-        <AuthGuard adminOnly>
-          <SSOPage />
+        <AuthGuard superAdminOnly>
+          <AdminLayout>
+            <SSOPage />
+          </AdminLayout>
+        </AuthGuard>
+      </Route>
+
+      <Route path="/admin/branding">
+        <AuthGuard superAdminOnly>
+          <AdminLayout>
+            <BrandingPage />
+          </AdminLayout>
+        </AuthGuard>
+      </Route>
+
+      <Route path="/admin/provider-keys">
+        <AuthGuard superAdminOnly>
+          <AdminLayout>
+            <ProviderKeysPage />
+          </AdminLayout>
+        </AuthGuard>
+      </Route>
+
+      <Route path="/admin">
+        <AuthGuard superAdminOnly>
+          <Redirect to="/admin/branding" />
         </AuthGuard>
       </Route>
 

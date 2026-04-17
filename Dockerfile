@@ -19,7 +19,7 @@ RUN npm run build
 FROM node:20-alpine AS runner
 WORKDIR /app
 
-RUN apk add --no-cache dumb-init docker-cli \
+RUN apk add --no-cache dumb-init docker-cli git \
  && ARCH="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
  && wget -qO /usr/local/bin/kubectl \
       "https://dl.k8s.io/release/$(wget -qO- https://dl.k8s.io/release/stable.txt)/bin/linux/${ARCH}/kubectl" \

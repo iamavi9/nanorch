@@ -12,14 +12,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Plus, Trash2, CheckCircle2, XCircle, Loader2, RefreshCw, Plug,
-  ShieldCheck, CloudCog, Database, Wrench, BookOpen, Pencil, MessageSquare, LifeBuoy,
+  ShieldCheck, CloudCog, Database, Wrench, BookOpen, Pencil, MessageSquare, LifeBuoy, Server,
 } from "lucide-react";
-import { SiAmazon, SiGooglecloud, SiJira, SiGithub, SiGitlab, SiSlack, SiGooglechat } from "react-icons/si";
+import { SiAmazon, SiGooglecloud, SiJira, SiGithub, SiGitlab, SiSlack, SiGooglechat, SiKubernetes } from "react-icons/si";
 import type { CloudIntegration } from "@shared/schema";
 
 interface Props { workspaceId: string; }
 
-type Provider = "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "slack" | "google_chat" | "servicenow";
+type Provider = "aws" | "gcp" | "azure" | "ragflow" | "jira" | "github" | "gitlab" | "teams" | "slack" | "google_chat" | "servicenow" | "postgresql" | "kubernetes";
 
 const PROVIDER_META: Record<Provider, { label: string; icon: React.ElementType; color: string; bg: string; category: string }> = {
   aws:         { label: "AWS",          icon: SiAmazon,          color: "text-orange-500",  bg: "bg-orange-500/10",   category: "Cloud" },
@@ -33,6 +33,8 @@ const PROVIDER_META: Record<Provider, { label: string; icon: React.ElementType; 
   slack:       { label: "Slack",        icon: SiSlack,           color: "text-green-500",   bg: "bg-green-500/10",    category: "Messaging" },
   google_chat: { label: "Google Chat",  icon: SiGooglechat,      color: "text-blue-400",    bg: "bg-blue-400/10",     category: "Messaging" },
   servicenow:  { label: "ServiceNow",   icon: LifeBuoy,          color: "text-emerald-500", bg: "bg-emerald-500/10",  category: "ITSM" },
+  postgresql:  { label: "PostgreSQL",   icon: Database,          color: "text-sky-600",     bg: "bg-sky-600/10",      category: "Database" },
+  kubernetes:  { label: "Kubernetes",   icon: SiKubernetes,      color: "text-blue-500",    bg: "bg-blue-500/10",     category: "Kubernetes" },
 };
 
 type SafeIntegration = Omit<CloudIntegration, "credentialsEncrypted"> & { credentialsMeta?: Record<string, string> };
@@ -69,6 +71,8 @@ const EMPTY_CREDS: Record<Provider, Record<string, string>> = {
   slack:       { botToken: "", defaultChannel: "" },
   google_chat: { webhookUrl: "" },
   servicenow:  { instanceUrl: "", username: "", password: "" },
+  postgresql:  { connectionString: "" },
+  kubernetes:  { apiServer: "", bearerToken: "", caCertBase64: "", insecureSkipTlsVerify: "false", kubeconfigJson: "", defaultNamespace: "default" },
 };
 
 const REQUIRED_FIELDS: Record<Provider, string[]> = {
@@ -83,6 +87,8 @@ const REQUIRED_FIELDS: Record<Provider, string[]> = {
   slack:       ["botToken"],
   google_chat: ["webhookUrl"],
   servicenow:  ["instanceUrl", "username", "password"],
+  postgresql:  ["connectionString"],
+  kubernetes:  [],
 };
 
 const FIELD_LABELS: Record<string, string> = {
@@ -95,6 +101,9 @@ const FIELD_LABELS: Record<string, string> = {
   botToken: "Bot Token", defaultChannel: "Default Channel",
   webhookUrl: "Webhook URL",
   instanceUrl: "Instance URL", username: "Username", password: "Password",
+  connectionString: "Connection String",
+  apiServer: "API Server URL", bearerToken: "Bearer Token", caCertBase64: "CA Certificate (Base64)",
+  insecureSkipTlsVerify: "Skip TLS Verify", kubeconfigJson: "Kubeconfig JSON", defaultNamespace: "Default Namespace",
 };
 
 function validateRequiredCreds(provider: Provider, creds: Record<string, string>): string | null {
@@ -255,6 +264,75 @@ function CredentialFields({ provider, creds, onChange }: {
       <p className="text-xs text-muted-foreground">
         Create a dedicated integration user in ServiceNow with the <strong>itil</strong> role for incident/RITM/change access and <strong>catalog</strong> role for Service Catalog ordering.
       </p>
+    </div>
+  );
+
+  if (provider === "postgresql") return (
+    <div className="space-y-3">
+      <div className="space-y-1.5"><Label>Connection String</Label>
+        <Input
+          type="password"
+          placeholder="postgres://user:password@host:5432/dbname"
+          value={creds.connectionString}
+          onChange={(e) => set("connectionString", e.target.value)}
+          data-testid="input-postgresql-connection-string"
+        />
+        <p className="text-xs text-muted-foreground">
+          Standard PostgreSQL connection string. Use a read-only user for query-only workloads;
+          use a write-capable user only when agents need <strong>pg_execute</strong> access.
+          SSL is supported — append <code className="text-xs">?sslmode=require</code> if needed.
+        </p>
+      </div>
+    </div>
+  );
+
+  if (provider === "kubernetes") return (
+    <div className="space-y-4">
+      <p className="text-xs text-muted-foreground bg-muted/40 rounded-md p-2">
+        Provide either <strong>API Server + Bearer Token</strong> (direct access) <em>or</em> a <strong>Kubeconfig JSON</strong> — not both.
+      </p>
+      <div className="space-y-3">
+        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Option A — Direct Access</p>
+        <div className="space-y-1.5"><Label>API Server URL</Label>
+          <Input placeholder="https://my-cluster.example.com:6443" value={creds.apiServer} onChange={(e) => set("apiServer", e.target.value)} data-testid="input-k8s-api-server" />
+        </div>
+        <div className="space-y-1.5"><Label>Bearer Token</Label>
+          <Input type="password" placeholder="eyJhbGciOiJSUzI1NiI..." value={creds.bearerToken} onChange={(e) => set("bearerToken", e.target.value)} data-testid="input-k8s-token" />
+          <p className="text-xs text-muted-foreground">Service account token. Get via: <code className="text-xs">kubectl get secret &lt;sa-secret&gt; -o jsonpath='{"{.data.token}"}'  | base64 -d</code></p>
+        </div>
+        <div className="space-y-1.5"><Label>CA Certificate (Base64) <span className="text-muted-foreground font-normal">(optional)</span></Label>
+          <Input placeholder="LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t..." value={creds.caCertBase64} onChange={(e) => set("caCertBase64", e.target.value)} data-testid="input-k8s-ca" />
+        </div>
+        <div className="flex items-center gap-3">
+          <input
+            type="checkbox"
+            id="k8s-skip-tls"
+            checked={creds.insecureSkipTlsVerify === "true"}
+            onChange={(e) => set("insecureSkipTlsVerify", e.target.checked ? "true" : "false")}
+            data-testid="checkbox-k8s-skip-tls"
+            className="h-4 w-4"
+          />
+          <Label htmlFor="k8s-skip-tls" className="font-normal text-sm cursor-pointer">
+            Skip TLS verification <span className="text-muted-foreground">(not recommended for production)</span>
+          </Label>
+        </div>
+      </div>
+      <div className="border-t pt-3 space-y-3">
+        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Option B — Kubeconfig JSON</p>
+        <div className="space-y-1.5">
+          <Textarea
+            placeholder='{"apiVersion":"v1","clusters":[...],"contexts":[...],...}'
+            className="font-mono text-xs h-28 resize-none"
+            value={creds.kubeconfigJson}
+            onChange={(e) => set("kubeconfigJson", e.target.value)}
+            data-testid="input-k8s-kubeconfig"
+          />
+          <p className="text-xs text-muted-foreground">Paste a JSON-formatted kubeconfig. Convert with: <code className="text-xs">kubectl config view --raw -o json</code></p>
+        </div>
+      </div>
+      <div className="space-y-1.5"><Label>Default Namespace <span className="text-muted-foreground font-normal">(optional)</span></Label>
+        <Input placeholder="default" value={creds.defaultNamespace} onChange={(e) => set("defaultNamespace", e.target.value)} data-testid="input-k8s-namespace" />
+      </div>
     </div>
   );
 
@@ -436,6 +514,8 @@ export default function IntegrationsPage({ workspaceId }: Props) {
     Knowledge: integrations.filter((i) => i.provider === "ragflow"),
     Messaging: integrations.filter((i) => ["teams", "slack", "google_chat"].includes(i.provider)),
     ITSM: integrations.filter((i) => ["servicenow"].includes(i.provider)),
+    Database: integrations.filter((i) => ["postgresql"].includes(i.provider)),
+    Kubernetes: integrations.filter((i) => i.provider === "kubernetes"),
   };
 
   return (
@@ -470,6 +550,8 @@ export default function IntegrationsPage({ workspaceId }: Props) {
                     <SelectItem value="slack">Slack</SelectItem>
                     <SelectItem value="google_chat">Google Chat</SelectItem>
                     <SelectItem value="servicenow">ServiceNow</SelectItem>
+                    <SelectItem value="postgresql">PostgreSQL</SelectItem>
+                    <SelectItem value="kubernetes">Kubernetes</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -539,7 +621,7 @@ export default function IntegrationsPage({ workspaceId }: Props) {
         </Card>
       ) : (
         <div className="space-y-8">
-          {(["Cloud", "DevTools", "Knowledge", "Messaging", "ITSM"] as const).map((cat) => {
+          {(["Cloud", "DevTools", "Knowledge", "Messaging", "ITSM", "Database", "Kubernetes"] as const).map((cat) => {
             const items = grouped[cat];
             if (items.length === 0) return null;
             return (

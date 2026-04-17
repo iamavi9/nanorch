@@ -27,6 +27,49 @@ interface TokenEntry {
   expiresAt: number;
 }
 
+// ── Per-task token-usage accumulator ─────────────────────────────────────────
+// Each call the agent container makes goes through this proxy.  For non-streaming
+// JSON responses we buffer the body and extract the provider's usage fields so
+// Docker / K3s executors can record token usage in the database at task completion.
+
+interface ProxiedUsage { inputTokens: number; outputTokens: number; }
+const taskProxiedUsage = new Map<string, ProxiedUsage>();
+
+/** Retrieve (and remove) accumulated token usage for a completed task. */
+export function getAndClearProxiedUsage(taskId: string): ProxiedUsage | null {
+  const u = taskProxiedUsage.get(taskId);
+  taskProxiedUsage.delete(taskId);
+  return u ?? null;
+}
+
+function accumulateProxiedUsage(taskId: string, inp: number, out: number): void {
+  const cur = taskProxiedUsage.get(taskId) ?? { inputTokens: 0, outputTokens: 0 };
+  taskProxiedUsage.set(taskId, {
+    inputTokens: cur.inputTokens + inp,
+    outputTokens: cur.outputTokens + out,
+  });
+}
+
+function parseUsageTokens(
+  provider: string,
+  body: string,
+): { inputTokens: number; outputTokens: number } | null {
+  try {
+    const j = JSON.parse(body);
+    if (provider === "openai") {
+      const u = j?.usage;
+      if (u) return { inputTokens: u.prompt_tokens ?? 0, outputTokens: u.completion_tokens ?? 0 };
+    } else if (provider === "anthropic") {
+      const u = j?.usage;
+      if (u) return { inputTokens: u.input_tokens ?? 0, outputTokens: u.output_tokens ?? 0 };
+    } else if (provider === "gemini") {
+      const u = j?.usageMetadata;
+      if (u) return { inputTokens: u.promptTokenCount ?? 0, outputTokens: u.candidatesTokenCount ?? 0 };
+    }
+    return null;
+  } catch { return null; }
+}
+
 const byToken = new Map<string, TokenEntry>();
 const byTask  = new Map<string, string>(); // taskId → token
 
@@ -147,6 +190,9 @@ export function createInferenceProxyRouter(): Router {
       return;
     }
 
+    // Capture taskId now (before the async proxy response) so we can attribute usage.
+    const taskId = byToken.get(incoming)?.taskId ?? null;
+
     // ── 2. Resolve real key ──────────────────────────────────────────────────
     const realKey = loadSecret(cfg.secretName);
     if (!realKey) {
@@ -171,7 +217,11 @@ export function createInferenceProxyRouter(): Router {
     const port       = parseInt(targetBase.port || (isHttps ? "443" : "80"), 10);
 
     // ── 4. Build forwarded headers ───────────────────────────────────────────
-    const STRIP = new Set(["host", "authorization", "x-api-key", "content-length"]);
+    // Strip headers that must not be forwarded, plus accept-encoding so the
+    // upstream always returns an uncompressed JSON body.  The proxy must be
+    // able to parse the response for usage accounting; a gzip/br body would
+    // cause JSON.parse to fail silently and lose token counts.
+    const STRIP = new Set(["host", "authorization", "x-api-key", "content-length", "accept-encoding"]);
     const fwdHeaders: Record<string, string | string[]> = {};
     for (const [k, v] of Object.entries(req.headers)) {
       if (STRIP.has(k.toLowerCase())) continue;
@@ -204,9 +254,29 @@ export function createInferenceProxyRouter(): Router {
     };
 
     const proxyReq = transport.request(options, (proxyRes) => {
-      const status = proxyRes.statusCode ?? 502;
+      const status   = proxyRes.statusCode ?? 502;
+      const ct       = (proxyRes.headers["content-type"] ?? "").toLowerCase();
+      const isStream = ct.includes("text/event-stream") || ct.includes("application/octet-stream");
+
       res.writeHead(status, sanitizeResponseHeaders(proxyRes.headers));
-      proxyRes.pipe(res, { end: true });
+
+      // For non-streaming 2xx JSON responses: buffer so we can extract usage counts.
+      if (!isStream && status >= 200 && status < 300 && taskId) {
+        const chunks: Buffer[] = [];
+        proxyRes.on("data", (c: Buffer) => chunks.push(c));
+        proxyRes.on("end", () => {
+          const body = Buffer.concat(chunks);
+          res.end(body);
+          try {
+            const usage = parseUsageTokens(provider, body.toString("utf-8"));
+            if (usage && (usage.inputTokens > 0 || usage.outputTokens > 0)) {
+              accumulateProxiedUsage(taskId, usage.inputTokens, usage.outputTokens);
+            }
+          } catch { /* ignore — never block the response */ }
+        });
+      } else {
+        proxyRes.pipe(res, { end: true });
+      }
     });
 
     proxyReq.on("error", (err) => {
@@ -238,6 +308,11 @@ function sanitizeResponseHeaders(
     "te",
     "trailers",
     "upgrade",
+    // We strip accept-encoding on the request so the upstream returns plain
+    // JSON, but some providers still echo a content-encoding header.  Strip
+    // it here so the downstream client (agent SDK) doesn't try to decompress
+    // a body that is already uncompressed.
+    "content-encoding",
   ]);
   for (const [k, v] of Object.entries(headers)) {
     if (HOP.has(k.toLowerCase())) continue;

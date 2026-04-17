@@ -2,18 +2,18 @@ import { GoogleGenAI } from "@google/genai";
 import { loadSecret } from "../lib/secrets";
 import type { RunAgentOptions, RunAgentResult, ToolCall } from "./index";
 
-function getClient() {
+function getClient(apiKey?: string | null, baseUrl?: string | null) {
   return new GoogleGenAI({
-    apiKey: loadSecret("AI_INTEGRATIONS_GEMINI_API_KEY"),
+    apiKey: apiKey ?? loadSecret("AI_INTEGRATIONS_GEMINI_API_KEY"),
     httpOptions: {
       apiVersion: "",
-      baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL,
+      baseUrl: baseUrl ?? process.env.AI_INTEGRATIONS_GEMINI_BASE_URL,
     },
   });
 }
 
 export async function runGemini(options: RunAgentOptions): Promise<RunAgentResult> {
-  const ai = getClient();
+  const ai = getClient(options.apiKey, options.baseUrl);
   const contents = options.messages
     .filter((m) => m.role !== "system")
     .map((m) => ({

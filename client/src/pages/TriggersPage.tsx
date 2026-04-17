@@ -106,6 +106,7 @@ export default function TriggersPage({ workspaceId }: { workspaceId: string }) {
       return res.json();
     },
     enabled: !!expandedId,
+    refetchInterval: 10000,
   });
   const triggerEvents = eventsData?.events ?? [];
 

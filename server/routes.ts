@@ -18,8 +18,10 @@ import { encrypt, decrypt } from "./lib/encryption";
 import { validateCredentials, executeCloudTool, retrieveRAGFlowContext } from "./cloud/executor";
 import { getToolsForProvider, detectProviderFromToolName, CODE_INTERPRETER_TOOL, SPAWN_AGENT_TOOL } from "./cloud/tools";
 import type { ToolDefinition } from "./providers";
+import { AGENT_TEMPLATES } from "./lib/agent-templates";
 import { runCode } from "./engine/sandbox-executor";
 import { executeTask } from "./engine/executor";
+import { generateEmbedding } from "./lib/embeddings";
 import { db, pool } from "./db";
 import { tasks } from "@shared/schema";
 import { eq } from "drizzle-orm";
@@ -35,6 +37,33 @@ import { handleSlackEvent, verifySlackSignature } from "./comms/slack-handler";
 import { handleTeamsEvent } from "./comms/teams-handler";
 import { handleGoogleChatEvent } from "./comms/google-chat-handler";
 import { createInferenceProxyRouter } from "./proxy/inference-proxy";
+import {
+  processGitWebhook, verifyGitHubSignature, verifyGitLabSignature,
+  parseGitHubEvent, parseGitLabEvent,
+} from "./engine/git-agent-engine";
+import { insertGitAgentSchema, insertGitRepoSchema } from "@shared/schema";
+
+// ── Provider key resolver (workspace key → global DB key → env var) ───────────
+async function resolveProviderApiKey(provider: string, workspaceId: string): Promise<string | null> {
+  // 1. Workspace-specific key (set by workspace admin)
+  const wsKey = await storage.getProviderKey(workspaceId, provider);
+  if (wsKey) {
+    try { return decrypt(wsKey.encryptedKey); } catch { /* fall through */ }
+  }
+  // 2. Global platform key (set by superadmin via console)
+  const globalKey = await storage.getProviderKey(null, provider);
+  if (globalKey) {
+    try { return decrypt(globalKey.encryptedKey); } catch { /* fall through */ }
+  }
+  // 3. Environment variable fallback
+  const envMap: Record<string, string> = {
+    openai:    "AI_INTEGRATIONS_OPENAI_API_KEY",
+    anthropic: "AI_INTEGRATIONS_ANTHROPIC_API_KEY",
+    gemini:    "AI_INTEGRATIONS_GEMINI_API_KEY",
+  };
+  const envVar = envMap[provider];
+  return envVar ? (loadSecret(envVar) ?? null) : null;
+}
 
 // ── Chat title generator ───────────────────────────────────────────────────────
 async function generateChatTitle(firstMessage: string): Promise<string> {
@@ -201,12 +230,13 @@ async function runSubtaskAgent(params: {
   return accumulated;
 }
 
-async function classifyIntent(content: string, provider: string, model: string, baseUrl?: string | null): Promise<"action" | "code_execution" | "conversational"> {
+async function classifyIntent(content: string, provider: string, model: string, baseUrl?: string | null, apiKey?: string | null): Promise<"action" | "code_execution" | "conversational"> {
   try {
     const result = await runAgent({
       provider: provider as any,
       model,
       baseUrl,
+      apiKey,
       systemPrompt:
         "You are an intent classifier. Reply with ONLY one word: 'action', 'code_execution', or 'conversational'.\n" +
         "'action' = the message wants to perform a cloud or DevOps operation that writes, mutates, or manages infrastructure: create/update/delete/deploy/run/trigger/manage resources on AWS, GCP, Azure, Jira, GitHub, or GitLab. Also 'action' for read-only queries on those platforms (list EC2 instances, search Jira issues, list PRs, etc.).\n" +
@@ -254,7 +284,8 @@ async function runPreflightAnalysis(
   tools: ToolDefinition[],
   provider: string,
   model: string,
-  baseUrl?: string | null
+  baseUrl?: string | null,
+  apiKey?: string | null
 ): Promise<PreflightResult | null> {
   if (tools.length === 0) return null;
   try {
@@ -263,6 +294,7 @@ async function runPreflightAnalysis(
       provider: provider as any,
       model,
       baseUrl,
+      apiKey,
       systemPrompt:
         `You are a pre-flight analyzer. Given a user request and the available tools, predict exactly what tool calls will be made to fulfil it.\n` +
         `Available tools:\n${toolList}\n\n` +
@@ -605,6 +637,45 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  // ── Admin — Global Observability ─────────────────────────────────────────
+  app.get("/api/admin/observability", requireAdmin, async (req, res) => {
+    const days = parseInt(req.query.days as string ?? "30", 10) || 30;
+    const stats = await storage.getGlobalTokenStats(days);
+    res.json(stats);
+  });
+
+  // ── Agent templates (static, no DB) ─────────────────────────────────────
+  app.get("/api/agent-templates", requireAuth, (_req, res) => {
+    res.json(AGENT_TEMPLATES);
+  });
+
+  // ── Global branding (public read, admin write) ────────────────────────────
+  app.get("/api/settings/branding", async (_req, res) => {
+    try {
+      const settings = await storage.getGlobalSettings();
+      res.json(settings);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to load branding settings" });
+    }
+  });
+
+  app.put("/api/settings/branding", requireAdmin, async (req, res) => {
+    try {
+      const { appName, appLogoUrl, faviconUrl } = req.body;
+      if (!appName || typeof appName !== "string" || !appName.trim()) {
+        return void res.status(400).json({ error: "appName is required" });
+      }
+      const updated = await storage.updateGlobalSettings({
+        appName: appName.trim(),
+        appLogoUrl: appLogoUrl?.trim() || null,
+        faviconUrl: faviconUrl?.trim() || null,
+      });
+      res.json(updated);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to update branding settings" });
+    }
+  });
+
   // ── Admin — SSO Provider CRUD ─────────────────────────────────────────────
   app.get("/api/admin/sso-providers", requireAdmin, async (_req, res) => {
     const providers = await storage.listSsoProviders();
@@ -629,6 +700,49 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json({ ok: true });
   });
 
+  // ── Global provider keys (superadmin only) ─────────────────────────────────
+  app.get("/api/admin/provider-keys", requireAdmin, async (_req, res) => {
+    const keys = await storage.listProviderKeys(null);
+    res.json(keys.map((k) => ({ ...k, encryptedKey: undefined, hasKey: true })));
+  });
+
+  app.put("/api/admin/provider-keys/:provider", requireAdmin, async (req, res) => {
+    const provider = req.params.provider as string;
+    const { apiKey, baseUrl } = req.body as { apiKey?: string; baseUrl?: string };
+    if (!apiKey) return res.status(400).json({ error: "apiKey required" });
+    const encrypted = encrypt(apiKey);
+    const actorId = (req as any).user?.id as string | null ?? null;
+    await storage.upsertProviderKey(null, provider, encrypted, baseUrl?.trim() || null, null, actorId);
+    res.json({ ok: true });
+  });
+
+  app.delete("/api/admin/provider-keys/:provider", requireAdmin, async (req, res) => {
+    await storage.deleteProviderKey(null, req.params.provider as string);
+    res.json({ ok: true });
+  });
+
+  // ── Workspace provider keys (admin / workspace admin) ─────────────────────
+  app.get("/api/workspaces/:wid/provider-keys", requireAdmin, async (req, res) => {
+    const keys = await storage.listProviderKeys(req.params.wid as string);
+    res.json(keys.map((k) => ({ ...k, encryptedKey: undefined, hasKey: true })));
+  });
+
+  app.put("/api/workspaces/:wid/provider-keys/:provider", requireAdmin, async (req, res) => {
+    const wid = req.params.wid as string;
+    const provider = req.params.provider as string;
+    const { apiKey, baseUrl } = req.body as { apiKey?: string; baseUrl?: string };
+    if (!apiKey) return res.status(400).json({ error: "apiKey required" });
+    const encrypted = encrypt(apiKey);
+    const actorId = (req as any).user?.id as string | null ?? null;
+    await storage.upsertProviderKey(wid, provider, encrypted, baseUrl?.trim() || null, null, actorId);
+    res.json({ ok: true });
+  });
+
+  app.delete("/api/workspaces/:wid/provider-keys/:provider", requireAdmin, async (req, res) => {
+    await storage.deleteProviderKey(req.params.wid as string, req.params.provider as string);
+    res.json({ ok: true });
+  });
+
   // ── Global auth guard (after public routes above) ─────────────────────────
   app.use("/api", (req, res, next) => {
     const isPublic =
@@ -645,42 +759,35 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
-  const taskSubscribers = new Map<string, Set<WebSocket>>();
 
   wss.on("connection", (ws) => {
     let subscribedTaskId: string | null = null;
+    let taskLogHandler: ((log: unknown) => void) | null = null;
 
     ws.on("message", (msg) => {
       try {
         const data = JSON.parse(msg.toString());
         if (data.type === "subscribe" && data.taskId) {
-          subscribedTaskId = data.taskId;
-          if (!taskSubscribers.has(data.taskId)) {
-            taskSubscribers.set(data.taskId, new Set());
+          if (subscribedTaskId && taskLogHandler) {
+            taskLogEmitter.off(`task:${subscribedTaskId}`, taskLogHandler);
           }
-          taskSubscribers.get(data.taskId)!.add(ws);
-          ws.send(JSON.stringify({ type: "subscribed", taskId: data.taskId }));
+          subscribedTaskId = data.taskId;
+          taskLogHandler = (log: unknown) => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "log", data: log }));
+            }
+          };
+          taskLogEmitter.on(`task:${subscribedTaskId}`, taskLogHandler);
+          ws.send(JSON.stringify({ type: "subscribed", taskId: subscribedTaskId }));
         }
       } catch {}
     });
 
     ws.on("close", () => {
-      if (subscribedTaskId) {
-        taskSubscribers.get(subscribedTaskId)?.delete(ws);
+      if (subscribedTaskId && taskLogHandler) {
+        taskLogEmitter.off(`task:${subscribedTaskId}`, taskLogHandler);
       }
     });
-  });
-
-  taskLogEmitter.on("task:*", function (this: string, log: unknown) {
-    const taskId = this.replace("task:", "");
-    const subscribers = taskSubscribers.get(taskId);
-    if (!subscribers) return;
-    const msg = JSON.stringify({ type: "log", data: log });
-    for (const ws of Array.from(subscribers)) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(msg);
-      }
-    }
   });
 
   app.get("/api/providers/models", (_req, res) => {
@@ -762,11 +869,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/workspaces/:id/orchestrators", requireAuth, async (req, res) => {
     const orchs = await storage.listOrchestrators(req.params.id as string);
-    res.json(orchs);
+    // Strip encrypted vllmApiKey from list response — the detail GET endpoint decrypts it when needed.
+    res.json(orchs.map((o) => ({ ...o, vllmApiKey: o.vllmApiKey ? true : null })));
   });
 
   app.post("/api/workspaces/:id/orchestrators", requireWorkspaceAdmin, async (req, res) => {
-    const parsed = insertOrchestratorSchema.safeParse({ ...req.body, workspaceId: req.params.id as string });
+    const body = { ...req.body, workspaceId: req.params.id as string };
+    if (body.vllmApiKey) body.vllmApiKey = encrypt(body.vllmApiKey);
+    else if (body.vllmApiKey === "") body.vllmApiKey = null;
+    const parsed = insertOrchestratorSchema.safeParse(body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
     const cfg = await storage.getWorkspaceConfig(req.params.id as string);
     if (cfg?.maxOrchestrators != null) {
@@ -778,18 +889,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       return res.status(403).json({ error: `AI provider "${parsed.data.provider}" is not allowed in this workspace.` });
     }
     const orch = await storage.createOrchestrator(parsed.data);
-    res.status(201).json(orch);
+    res.status(201).json({ ...orch, vllmApiKey: orch.vllmApiKey ? decrypt(orch.vllmApiKey) : null });
   });
 
   app.get("/api/orchestrators/:id", requireAuth, async (req, res) => {
     const orch = await storage.getOrchestrator(req.params.id as string);
     if (!orch) return res.status(404).json({ error: "Not found" });
-    res.json(orch);
+    res.json({ ...orch, vllmApiKey: orch.vllmApiKey ? decrypt(orch.vllmApiKey) : null });
   });
 
   app.put("/api/orchestrators/:id", requireAuth, async (req, res) => {
-    const orch = await storage.updateOrchestrator(req.params.id as string, req.body);
-    res.json(orch);
+    const update = { ...req.body };
+    if (update.vllmApiKey) update.vllmApiKey = encrypt(update.vllmApiKey);
+    else if (update.vllmApiKey === "") update.vllmApiKey = null;
+    const orch = await storage.updateOrchestrator(req.params.id as string, update);
+    res.json({ ...orch, vllmApiKey: orch.vllmApiKey ? decrypt(orch.vllmApiKey) : null });
   });
 
   app.delete("/api/orchestrators/:id", requireAuth, async (req, res) => {
@@ -1046,34 +1160,73 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json(logs);
   });
 
-  app.get("/api/tasks/:id/stream", async (req: Request, res: Response) => {
+  app.get("/api/tasks/:id/stream", requireAuth, async (req: Request, res: Response) => {
     const taskId = req.params.id as string;
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
 
+    let taskClientGone = false;
+    req.on("close", () => { taskClientGone = true; });
+
     const sendLog = (data: unknown) => {
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
+      if (!taskClientGone && !res.writableEnded) res.write(`data: ${JSON.stringify(data)}\n\n`);
     };
 
+    const sendDone = (status: string) => {
+      if (!taskClientGone && !res.writableEnded) {
+        res.write(`data: ${JSON.stringify({ type: "done", status })}\n\n`);
+        res.end();
+      }
+    };
+
+    // Subscribe to live events BEFORE reading current state to eliminate the
+    // race window where a fast task could complete between getTask() and .on().
+    let doneAlreadySent = false;
+    const logHandler = (entry: unknown) => {
+      const e = entry as any;
+      if (e?.type === "done") {
+        if (!doneAlreadySent) { doneAlreadySent = true; sendDone(e.status ?? "completed"); }
+      } else {
+        sendLog(entry);
+      }
+    };
+    const tokenHandler = (content: string) => {
+      if (!taskClientGone && !res.writableEnded) {
+        res.write(`event: token\ndata: ${JSON.stringify({ content })}\n\n`);
+      }
+    };
+    taskLogEmitter.on(`task:${taskId}`, logHandler);
+    taskLogEmitter.on(`task:${taskId}:token`, tokenHandler);
+
+    // Replay existing logs then check if already finished.
     const existingLogs = await storage.listTaskLogs(taskId);
-    for (const log of existingLogs) {
-      sendLog(log);
-    }
+    for (const log of existingLogs) sendLog(log);
 
     const task = await storage.getTask(taskId);
-    if (task?.status === "completed" || task?.status === "failed") {
-      res.write(`data: ${JSON.stringify({ type: "done", status: task.status })}\n\n`);
-      res.end();
+    if ((task?.status === "completed" || task?.status === "failed") && !doneAlreadySent) {
+      doneAlreadySent = true;
+      taskLogEmitter.off(`task:${taskId}`, logHandler);
+      taskLogEmitter.off(`task:${taskId}:token`, tokenHandler);
+      sendDone(task.status);
       return;
     }
 
-    const logHandler = (log: unknown) => sendLog(log);
-    taskLogEmitter.on(`task:${taskId}`, logHandler);
-
     req.on("close", () => {
       taskLogEmitter.off(`task:${taskId}`, logHandler);
+      taskLogEmitter.off(`task:${taskId}:token`, tokenHandler);
     });
+  });
+
+  app.get("/api/tasks/:id/trace", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const taskId = req.params.id as string;
+      const logs = await storage.listTaskLogs(taskId);
+      const task = await storage.getTask(taskId);
+      res.json({ logs, task });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.get("/api/stats", requireAuth, async (_req, res) => {
@@ -1319,7 +1472,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders();
 
-    const send = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+    let clientGone = false;
+    req.on("close", () => { clientGone = true; });
+    const send = (data: object) => { if (!clientGone && !res.writableEnded) res.write(`data: ${JSON.stringify(data)}\n\n`); };
 
     send({ type: "user_message", message: userMsg });
 
@@ -1349,7 +1504,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           continue;
         }
 
-        const intent = await classifyIntent(content.trim(), agentMeta.provider, agentMeta.model, agentMeta.baseUrl);
+        // Resolve API key for this agent's provider (workspace → global → env var)
+        const resolvedProviderApiKey = await resolveProviderApiKey(agentMeta.provider, conv.workspaceId);
+
+        const intent = await classifyIntent(content.trim(), agentMeta.provider, agentMeta.model, agentMeta.baseUrl, resolvedProviderApiKey);
         const bypass = hasApprovalBypass(content.trim());
 
         if (intent === "action" && hasCloud && !bypass) {
@@ -1368,7 +1526,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             filteredForPreflight,
             agentMeta.provider,
             agentMeta.model,
-            agentMeta.baseUrl
+            agentMeta.baseUrl,
+            resolvedProviderApiKey
           );
 
           const confirmMsg = await storage.createChatMessage({
@@ -1475,8 +1634,46 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             agentTools = [...agentTools, SPAWN_AGENT_TOOL];
           }
 
+          // ── Memory injection (read path) ────────────────────────────────
+          if (agentMeta.memoryEnabled) {
+            const kvMemories = await storage.listAgentMemory(agentMeta.id);
+            if (kvMemories.length > 0) {
+              const memStr = kvMemories.map((m) => `${m.key}: ${m.value}`).join("\n");
+              effectiveSystemPrompt += `\n\nAgent memory (retained from past interactions):\n${memStr}`;
+            }
+            try {
+              const queryEmb = await generateEmbedding(content.trim());
+              if (queryEmb) {
+                const vecMems = await storage.retrieveVectorMemories(agentMeta.id, conv.workspaceId, queryEmb, 5);
+                const relevant = vecMems.filter((m) => m.similarity >= 0.70);
+                if (relevant.length > 0) {
+                  const vecStr = relevant.map((m, i) => `${i + 1}. [${m.source}] ${m.content}`).join("\n\n");
+                  effectiveSystemPrompt += `\n\nRelevant memories from past interactions:\n${vecStr}`;
+                }
+              }
+            } catch { /* skip if embedding unavailable */ }
+          }
+
+          // ── ReAct reasoning protocol injection ─────────────────────────
+          if (agentMeta.reactEnabled) {
+            effectiveSystemPrompt +=
+              `\n\nReasoning Protocol — follow this for every step:\n` +
+              `1. Before each tool call write: Thought: <goal> | <what you know> | <why this action> | <expected result>\n` +
+              `2. After each tool result write: Observe: <what you learned> | <plan change if any>\n` +
+              `3. End with a final Thought confirming the goal is achieved or stating what remains.\n` +
+              `Keep Thought/Observe blocks concise (1–3 sentences). Never skip them.`;
+          }
+
           let accumulated = "";
           const msgs = [...contextMessages];
+          // Accumulate tool activity for inline trace display and stored metadata
+          const toolActivityLog: Array<{
+            id: string; type: "reasoning" | "tool_call";
+            toolName?: string; reasoning?: string;
+            status: "done" | "error"; result?: string; error?: string;
+          }> = [];
+          let _callSeq = 0;
+          const nextCallId = () => `${agentId}-${Date.now()}-${_callSeq++}`;
 
           if (agentTools.length === 0) {
             // Simple streaming, no tools
@@ -1484,6 +1681,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
               provider: agentMeta.provider as any,
               model: agentMeta.model,
               baseUrl: agentMeta.baseUrl,
+              apiKey: resolvedProviderApiKey,
               systemPrompt: effectiveSystemPrompt,
               messages: msgs,
               maxTokens: agentMeta.maxTokens ?? 4096,
@@ -1504,6 +1702,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                 provider: agentMeta.provider as any,
                 model: agentMeta.model,
                 baseUrl: agentMeta.baseUrl,
+                apiKey: resolvedProviderApiKey,
                 systemPrompt: effectiveSystemPrompt,
                 messages: msgs,
                 maxTokens: agentMeta.maxTokens ?? 4096,
@@ -1520,6 +1719,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
               if (result.content) {
                 msgs.push({ role: "assistant", content: result.content });
+                // Emit reasoning so the frontend can show thinking between tool rounds
+                send({ type: "reasoning", agentId, content: result.content });
+                toolActivityLog.push({ id: nextCallId(), type: "reasoning", reasoning: result.content.slice(0, 2000), status: "done" });
               }
 
               const spawnCalls = result.toolCalls.filter((tc) => tc.name === "spawn_agent");
@@ -1528,7 +1730,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
               for (const toolCall of regularCalls) {
                 if (toolCall.name === "code_interpreter") {
                   const { language, code } = toolCall.arguments as { language: string; code: string };
+                  const codeCallId = nextCallId();
                   send({ type: "code_running", agentId, language });
+                  send({ type: "tool_call", agentId, toolName: `code_interpreter (${language})`, callId: codeCallId });
                   try {
                     const sandboxTimeout = agentMeta.sandboxTimeoutSeconds ?? undefined;
                     const sandboxResult = await runCode(language, code, sandboxTimeout);
@@ -1536,8 +1740,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                       ? `exit_code: 0\nstdout:\n${sandboxResult.stdout || "(no output)"}`
                       : `exit_code: ${sandboxResult.exitCode}\nstdout:\n${sandboxResult.stdout || "(no output)"}\nstderr:\n${sandboxResult.stderr || "(none)"}`;
                     msgs.push({ role: "user", content: `Tool code_interpreter result:\n${output}` });
+                    send({ type: "tool_call_done", agentId, callId: codeCallId, result: output.slice(0, 600), error: null });
+                    toolActivityLog.push({ id: codeCallId, type: "tool_call", toolName: `code_interpreter (${language})`, status: "done", result: output.slice(0, 600) });
                   } catch (err: any) {
-                    msgs.push({ role: "user", content: `Tool code_interpreter result: ERROR — ${err?.message ?? String(err)}` });
+                    const errMsg = err?.message ?? String(err);
+                    msgs.push({ role: "user", content: `Tool code_interpreter result: ERROR — ${errMsg}` });
+                    send({ type: "tool_call_done", agentId, callId: codeCallId, result: null, error: errMsg });
+                    toolActivityLog.push({ id: codeCallId, type: "tool_call", toolName: `code_interpreter (${language})`, status: "error", error: errMsg });
                   }
                   continue;
                 }
@@ -1546,12 +1755,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                 const cred = loadedCreds.find((c) => c.provider === provider);
 
                 if (!cred) {
-                  msgs.push({ role: "user", content: `Tool ${toolCall.name} result: ERROR — No ${provider} integration configured` });
+                  const errMsg = `No ${provider} integration configured`;
+                  msgs.push({ role: "user", content: `Tool ${toolCall.name} result: ERROR — ${errMsg}` });
+                  const skipCallId = nextCallId();
+                  send({ type: "tool_call", agentId, toolName: toolCall.name, callId: skipCallId });
+                  send({ type: "tool_call_done", agentId, callId: skipCallId, result: null, error: errMsg });
+                  toolActivityLog.push({ id: skipCallId, type: "tool_call", toolName: toolCall.name, status: "error", error: errMsg });
                   continue;
                 }
 
+                const cloudCallId = nextCallId();
                 try {
-                  send({ type: "tool_call", agentId, toolName: toolCall.name });
+                  send({ type: "tool_call", agentId, toolName: toolCall.name, callId: cloudCallId });
                   const toolResult = await executeCloudTool(toolCall.name, toolCall.arguments, cred as any);
 
                   // Capture RAGFlow sources — only for conversational intent.
@@ -1570,9 +1785,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                     }
                   }
 
-                  msgs.push({ role: "user", content: `Tool ${toolCall.name} result:\n${JSON.stringify(toolResult, null, 2)}` });
+                  const resultStr = JSON.stringify(toolResult, null, 2);
+                  msgs.push({ role: "user", content: `Tool ${toolCall.name} result:\n${resultStr}` });
+                  send({ type: "tool_call_done", agentId, callId: cloudCallId, result: resultStr.slice(0, 600), error: null });
+                  toolActivityLog.push({ id: cloudCallId, type: "tool_call", toolName: toolCall.name, status: "done", result: resultStr.slice(0, 600) });
                 } catch (err: any) {
-                  msgs.push({ role: "user", content: `Tool ${toolCall.name} result: ERROR — ${err.message}` });
+                  const errMsg = err?.message ?? String(err);
+                  msgs.push({ role: "user", content: `Tool ${toolCall.name} result: ERROR — ${errMsg}` });
+                  send({ type: "tool_call_done", agentId, callId: cloudCallId, result: null, error: errMsg });
+                  toolActivityLog.push({ id: cloudCallId, type: "tool_call", toolName: toolCall.name, status: "error", error: errMsg });
                 }
               }
 
@@ -1623,6 +1844,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                 provider: agentMeta.provider as any,
                 model: agentMeta.model,
                 baseUrl: agentMeta.baseUrl,
+                apiKey: resolvedProviderApiKey,
                 systemPrompt: effectiveSystemPrompt,
                 messages: [...msgs, { role: "user", content: "Please provide your final answer based on the tool results above." }],
                 maxTokens: agentMeta.maxTokens ?? 4096,
@@ -1636,13 +1858,26 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             }
           }
 
+          // ── Memory write (after response is complete) ───────────────────
+          if (agentMeta.memoryEnabled && accumulated) {
+            storage.setAgentMemory(agentMeta.id, "last_chat_output", accumulated.slice(0, 500)).catch(() => {});
+            generateEmbedding(accumulated.slice(0, 4000))
+              .then((emb) => {
+                if (emb) storage.storeVectorMemory(agentMeta.id, conv.workspaceId, accumulated, emb, "chat_output").catch(() => {});
+              })
+              .catch(() => {});
+          }
+
           const agentMsg = await storage.createChatMessage({
             conversationId: req.params.id as string,
             role: "agent",
             agentId,
             agentName: agentMeta.name,
             content: accumulated,
-            metadata: collectedSources.length > 0 ? { sources: collectedSources } : {},
+            metadata: {
+              ...(collectedSources.length > 0 ? { sources: collectedSources } : {}),
+              ...(toolActivityLog.length > 0 ? { toolActivity: toolActivityLog } : {}),
+            },
           });
 
           send({ type: "agent_done", agentId, agentName: agentMeta.name, messageId: agentMsg.id, metadata: agentMsg.metadata ?? {} });
@@ -1677,7 +1912,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders();
 
-    const send = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+    let clientGone2 = false;
+    req.on("close", () => { clientGone2 = true; });
+    const send = (data: object) => { if (!clientGone2 && !res.writableEnded) res.write(`data: ${JSON.stringify(data)}\n\n`); };
     const meta = message.metadata as Record<string, unknown>;
     const agentId = meta.agentId as string;
     const proposedAction = meta.proposedAction as string;
@@ -1753,6 +1990,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/workspaces/by-slug/:slug", requireAuth, async (req, res) => {
     const ws = await storage.getWorkspaceBySlug((req.params.slug as string));
     if (!ws) return res.status(404).json({ error: "Workspace not found" });
+    // Global admins can access any workspace; everyone else must be a member
+    if (req.session.userRole !== "admin") {
+      const isMember = await storage.isWorkspaceMember(ws.id, req.session.userId!);
+      if (!isMember) return res.status(403).json({ error: "You are not a member of this workspace" });
+    }
     res.json(ws);
   });
 
@@ -2189,15 +2431,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
     };
 
+    const payloadPreview = (JSON.stringify(payload ?? {}) ?? "{}").slice(0, 400);
+
     if (!matched) {
-      await storage.logTriggerEvent({ triggerId: trigger.id, source: trigger.source, eventType, payloadPreview: JSON.stringify(payload).slice(0, 400), matched: false });
+      await storage.logTriggerEvent({ triggerId: trigger.id, source: trigger.source, eventType, payloadPreview, matched: false });
       return;
     }
 
-    const prompt = renderTemplate(trigger.promptTemplate, { payload });
+    const prompt = renderTemplate(trigger.promptTemplate, { payload: payload ?? {} });
     const orchestrator = await storage.getOrchestrator(trigger.orchestratorId);
     if (!orchestrator) {
-      await storage.logTriggerEvent({ triggerId: trigger.id, source: trigger.source, eventType, payloadPreview: JSON.stringify(payload).slice(0, 400), matched: true, error: "Orchestrator not found" });
+      await storage.logTriggerEvent({ triggerId: trigger.id, source: trigger.source, eventType, payloadPreview, matched: true, error: "Orchestrator not found" });
       return;
     }
     const intent = await classifyIntent(prompt, orchestrator.provider, orchestrator.model, orchestrator.baseUrl);
@@ -2211,7 +2455,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       priority: 5,
     });
     await executeTask(task.id);
-    await storage.logTriggerEvent({ triggerId: trigger.id, source: trigger.source, eventType, payloadPreview: JSON.stringify(payload).slice(0, 400), matched: true, taskId: task.id });
+    await storage.logTriggerEvent({ triggerId: trigger.id, source: trigger.source, eventType, payloadPreview, matched: true, taskId: task.id });
   }
 
   // ── GitHub Webhook ────────────────────────────────────────────────────────
@@ -2222,9 +2466,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (trigger.secretToken) {
       const sig = req.headers["x-hub-signature-256"] as string | undefined;
       if (!sig) return res.status(401).json({ error: "Missing signature" });
-      const { createHmac } = await import("crypto");
-      const expected = "sha256=" + createHmac("sha256", trigger.secretToken).update(JSON.stringify(req.body)).digest("hex");
-      if (sig !== expected) return res.status(401).json({ error: "Invalid signature" });
+      const { createHmac, timingSafeEqual } = await import("crypto");
+      const rawBody = (req as any).rawBody as Buffer | undefined;
+      const payload = rawBody ?? Buffer.from(JSON.stringify(req.body));
+      const expected = "sha256=" + createHmac("sha256", trigger.secretToken).update(payload).digest("hex");
+      const sigBuf = Buffer.from(sig);
+      const expBuf = Buffer.from(expected);
+      if (sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) {
+        return res.status(401).json({ error: "Invalid signature" });
+      }
     }
 
     const eventType = (req.headers["x-github-event"] as string) ?? "push";
@@ -2239,7 +2489,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
     if (trigger.secretToken) {
       const token = req.headers["x-gitlab-token"] as string | undefined;
-      if (token !== trigger.secretToken) return res.status(401).json({ error: "Invalid token" });
+      if (!token) return res.status(401).json({ error: "Missing token" });
+      const { timingSafeEqual } = await import("crypto");
+      const a = Buffer.from(token), b = Buffer.from(trigger.secretToken);
+      if (a.length !== b.length || !timingSafeEqual(a, b)) return res.status(401).json({ error: "Invalid token" });
     }
 
     const rawEvent = (req.headers["x-gitlab-event"] as string) ?? "";
@@ -2254,8 +2507,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (!trigger || !trigger.isActive || trigger.source !== "jira") return res.status(404).json({ error: "Trigger not found" });
 
     if (trigger.secretToken) {
-      const token = (req.query.token as string) ?? req.headers["x-jira-token"];
-      if (token !== trigger.secretToken) return res.status(401).json({ error: "Invalid token" });
+      const token = ((req.query.token as string) ?? req.headers["x-jira-token"]) as string | undefined;
+      if (!token) return res.status(401).json({ error: "Missing token" });
+      const { timingSafeEqual } = await import("crypto");
+      const a = Buffer.from(token), b = Buffer.from(trigger.secretToken);
+      if (a.length !== b.length || !timingSafeEqual(a, b)) return res.status(401).json({ error: "Invalid token" });
     }
 
     const eventType: string = (req.body?.webhookEvent as string) ?? (req.body?.issue_event_type_name as string) ?? "jira:issue_updated";
@@ -2371,6 +2627,157 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (err: any) {
       console.error("[mcp] Error handling request:", err);
       if (!res.headersSent) res.status(500).json({ error: "MCP error" });
+    }
+  });
+
+  // ── Git Agents CRUD ─────────────────────────────────────────────────────────
+  app.get("/api/workspaces/:wid/git-agents", requireWorkspaceAdmin, async (req, res) => {
+    try {
+      const wid = req.params.wid as string;
+      const agents = await storage.listGitAgents(wid);
+      const withCounts = await Promise.all(agents.map(async (a) => ({
+        ...a,
+        runCount: await storage.countGitAgentRuns(a.id),
+      })));
+      res.json(withCounts);
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post("/api/workspaces/:wid/git-agents", requireWorkspaceAdmin, async (req, res) => {
+    try {
+      const wid = req.params.wid as string;
+      const parsed = insertGitAgentSchema.safeParse({ ...req.body, workspaceId: wid });
+      if (!parsed.success) return void res.status(400).json({ error: parsed.error.issues });
+      const agent = await storage.createGitAgent(parsed.data);
+      res.json(agent);
+    } catch (err: any) {
+      if (err.code === "23505") return void res.status(409).json({ error: "An agent with this slug already exists in the workspace" });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/workspaces/:wid/git-agents/:id", requireWorkspaceAdmin, async (req, res) => {
+    try {
+      const agent = await storage.getGitAgent(req.params.id as string);
+      if (!agent) return void res.status(404).json({ error: "Not found" });
+      res.json(agent);
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.put("/api/workspaces/:wid/git-agents/:id", requireWorkspaceAdmin, async (req, res) => {
+    try {
+      const { workspaceId: _drop, ...body } = req.body;
+      const agent = await storage.updateGitAgent(req.params.id as string, body);
+      res.json(agent);
+    } catch (err: any) {
+      if (err.code === "23505") return void res.status(409).json({ error: "An agent with this slug already exists in the workspace" });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/workspaces/:wid/git-agents/:id", requireWorkspaceAdmin, async (req, res) => {
+    try {
+      await storage.deleteGitAgent(req.params.id as string);
+      res.json({ ok: true });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.get("/api/workspaces/:wid/git-agents/:id/runs", requireWorkspaceAdmin, async (req, res) => {
+    try {
+      const limit = Number(req.query.limit) || 50;
+      const runs = await storage.listGitAgentRunsByAgent(req.params.id as string, limit);
+      res.json(runs);
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // ── Git Repos CRUD ───────────────────────────────────────────────────────────
+  app.get("/api/workspaces/:wid/git-repos", requireWorkspaceAdmin, async (req, res) => {
+    try {
+      const repos = await storage.listGitRepos(req.params.wid as string);
+      const safe = repos.map(({ tokenEncrypted: _, webhookSecret: __, ...r }) => r);
+      res.json(safe);
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post("/api/workspaces/:wid/git-repos", requireWorkspaceAdmin, async (req, res) => {
+    try {
+      const wid = req.params.wid as string;
+      const { provider, repoPath, repoUrl, token } = req.body as Record<string, string>;
+      if (!provider || !repoPath || !token) return void res.status(400).json({ error: "provider, repoPath and token are required" });
+      if (!["github", "gitlab"].includes(provider)) return void res.status(400).json({ error: "provider must be github or gitlab" });
+      const { encrypt } = await import("./lib/encryption");
+      const tokenEncrypted = encrypt(token);
+      const webhookSecret = randomUUID();
+      const repo = await storage.createGitRepo({
+        workspaceId: wid,
+        provider,
+        repoPath: repoPath.trim(),
+        repoUrl: repoUrl?.trim() || null,
+        tokenEncrypted,
+        webhookSecret,
+        webhookId: null,
+        lastYmlSha: null,
+      });
+      const { tokenEncrypted: _, ...safe } = repo;
+      res.json({ ...safe, webhookSecret });
+    } catch (err: any) {
+      if (err.code === "23505") return void res.status(409).json({ error: "This repository is already connected to the workspace" });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/workspaces/:wid/git-repos/:id", requireWorkspaceAdmin, async (req, res) => {
+    try {
+      await storage.deleteGitRepo(req.params.id as string);
+      res.json({ ok: true });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.get("/api/workspaces/:wid/git-repos/:id/runs", requireWorkspaceAdmin, async (req, res) => {
+    try {
+      const limit = Number(req.query.limit) || 50;
+      const runs = await storage.listGitAgentRuns(req.params.id as string, limit);
+      res.json(runs);
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // ── Git Webhook Handler ──────────────────────────────────────────────────────
+  app.post("/api/webhooks/git/:repoId", async (req, res) => {
+    try {
+      const repoId = req.params.repoId as string;
+      const repo = await storage.getGitRepo(repoId);
+      if (!repo || !repo.isActive) return void res.status(404).json({ error: "Repo not found" });
+
+      // rawBody is a Buffer captured by express.json()'s verify callback in index.ts
+      const rawBodyBuf = (req as any).rawBody as Buffer | undefined;
+      const rawBodyStr = rawBodyBuf?.toString("utf-8") ?? JSON.stringify(req.body);
+      const body = req.body as Record<string, unknown>;
+
+      const provider = repo.provider;
+      if (provider === "github") {
+        const sig = (req.headers["x-hub-signature-256"] as string) ?? "";
+        if (!verifyGitHubSignature(rawBodyStr, sig, repo.webhookSecret)) {
+          return void res.status(401).json({ error: "Invalid signature" });
+        }
+        const eventHeader = (req.headers["x-github-event"] as string) ?? "push";
+        const event = parseGitHubEvent(eventHeader, body);
+        res.json({ ok: true, queued: true });
+        processGitWebhook(repo, event).catch((e) => console.error("[git-webhook] Error:", e));
+      } else if (provider === "gitlab") {
+        const token = (req.headers["x-gitlab-token"] as string) ?? "";
+        if (!verifyGitLabSignature(token, repo.webhookSecret)) {
+          return void res.status(401).json({ error: "Invalid token" });
+        }
+        const eventHeader = (req.headers["x-gitlab-event"] as string) ?? "Push Hook";
+        const event = parseGitLabEvent(eventHeader, body);
+        res.json({ ok: true, queued: true });
+        processGitWebhook(repo, event).catch((e) => console.error("[git-webhook] Error:", e));
+      } else {
+        res.status(400).json({ error: "Unknown provider" });
+      }
+    } catch (err: any) {
+      console.error("[git-webhook]", err);
+      if (!res.headersSent) res.status(500).json({ error: "Webhook processing error" });
     }
   });
 

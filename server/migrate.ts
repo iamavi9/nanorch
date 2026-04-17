@@ -327,6 +327,165 @@ const INCREMENTAL_MIGRATIONS: Array<{ name: string; sql: string }> = [
     name: "add_event_triggers_bypass",
     sql: `ALTER TABLE "event_triggers" ADD COLUMN IF NOT EXISTS "bypass_approval" boolean DEFAULT false`,
   },
+  {
+    name: "enable_pgvector_extension",
+    sql: `CREATE EXTENSION IF NOT EXISTS vector`,
+  },
+  {
+    name: "create_agent_memory_vectors",
+    sql: `CREATE TABLE IF NOT EXISTS "agent_memory_vectors" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "agent_id" varchar NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      "workspace_id" varchar NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      "task_id" varchar,
+      "content" text NOT NULL,
+      "embedding" vector(1536) NOT NULL,
+      "source" text NOT NULL DEFAULT 'task_output',
+      "created_at" timestamp DEFAULT now()
+    )`,
+  },
+  {
+    name: "create_agent_memory_vectors_hnsw_index",
+    sql: `CREATE INDEX IF NOT EXISTS agent_memory_vectors_embedding_idx
+      ON agent_memory_vectors USING hnsw (embedding vector_cosine_ops)`,
+  },
+  {
+    name: "create_git_agents",
+    sql: `CREATE TABLE IF NOT EXISTS "git_agents" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "workspace_id" varchar NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      "name" text NOT NULL,
+      "slug" varchar NOT NULL,
+      "description" text,
+      "orchestrator_id" varchar REFERENCES orchestrators(id) ON DELETE SET NULL,
+      "system_prompt" text DEFAULT '',
+      "tools" jsonb DEFAULT '[]',
+      "memory_enabled" boolean DEFAULT false,
+      "output_config" jsonb DEFAULT '{"defaultOutputs":[]}',
+      "approval_config" jsonb DEFAULT '{"required":false}',
+      "is_mandatory" boolean DEFAULT false,
+      "requires_admin_approval" boolean DEFAULT false,
+      "is_active" boolean DEFAULT true,
+      "created_at" timestamp DEFAULT now(),
+      UNIQUE("workspace_id", "slug")
+    )`,
+  },
+  {
+    name: "create_git_repos",
+    sql: `CREATE TABLE IF NOT EXISTS "git_repos" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "workspace_id" varchar NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      "provider" text NOT NULL,
+      "repo_path" text NOT NULL,
+      "repo_url" text,
+      "token_encrypted" text NOT NULL,
+      "webhook_secret" text NOT NULL,
+      "webhook_id" text,
+      "last_yml_sha" text,
+      "last_yml_processed_at" timestamp,
+      "is_active" boolean DEFAULT true,
+      "created_at" timestamp DEFAULT now(),
+      UNIQUE("workspace_id", "repo_path")
+    )`,
+  },
+  {
+    name: "create_git_agent_runs",
+    sql: `CREATE TABLE IF NOT EXISTS "git_agent_runs" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "repo_id" varchar NOT NULL REFERENCES git_repos(id) ON DELETE CASCADE,
+      "git_agent_id" varchar REFERENCES git_agents(id) ON DELETE SET NULL,
+      "git_agent_slug" text NOT NULL,
+      "task_id" varchar REFERENCES tasks(id) ON DELETE SET NULL,
+      "event_type" text NOT NULL,
+      "event_ref" text,
+      "status" text NOT NULL DEFAULT 'pending',
+      "skip_reason" text,
+      "error_message" text,
+      "created_at" timestamp DEFAULT now()
+    )`,
+  },
+  {
+    name: "add_git_agents_notify_channel_id",
+    sql: `ALTER TABLE "git_agents" ADD COLUMN IF NOT EXISTS "notify_channel_id" varchar`,
+  },
+  {
+    name: "add_git_agents_post_git_comment",
+    sql: `ALTER TABLE "git_agents" ADD COLUMN IF NOT EXISTS "post_git_comment" boolean NOT NULL DEFAULT TRUE`,
+  },
+  {
+    name: "add_cloud_provider_postgresql",
+    sql: `ALTER TYPE "cloud_provider" ADD VALUE IF NOT EXISTS 'postgresql'`,
+  },
+  {
+    name: "add_vllm_provider_enum",
+    sql: `ALTER TYPE "provider" ADD VALUE IF NOT EXISTS 'vllm'`,
+  },
+  {
+    name: "add_orchestrators_vllm_api_key",
+    sql: `ALTER TABLE "orchestrators" ADD COLUMN IF NOT EXISTS "vllm_api_key" text`,
+  },
+  {
+    name: "normalize_workspace_slugs",
+    sql: `UPDATE workspaces
+          SET slug = lower(trim(slug))
+          WHERE slug != lower(trim(slug))
+            AND NOT EXISTS (
+              SELECT 1 FROM workspaces w2
+              WHERE lower(trim(w2.slug)) = lower(trim(workspaces.slug))
+                AND w2.id != workspaces.id
+            )`,
+  },
+  {
+    name: "add_task_logs_log_type",
+    sql: `ALTER TABLE "task_logs" ADD COLUMN IF NOT EXISTS "log_type" text DEFAULT 'info'`,
+  },
+  {
+    name: "add_task_logs_parent_log_id",
+    sql: `ALTER TABLE "task_logs" ADD COLUMN IF NOT EXISTS "parent_log_id" integer REFERENCES "task_logs"("id") ON DELETE SET NULL`,
+  },
+  {
+    name: "create_global_settings",
+    sql: `CREATE TABLE IF NOT EXISTS "global_settings" (
+      "id" varchar PRIMARY KEY DEFAULT 'singleton',
+      "app_name" text NOT NULL DEFAULT 'NanoOrch',
+      "app_logo_url" text,
+      "favicon_url" text,
+      "updated_at" timestamp DEFAULT now()
+    )`,
+  },
+  {
+    name: "seed_global_settings",
+    sql: `INSERT INTO "global_settings" (id, app_name) VALUES ('singleton', 'NanoOrch') ON CONFLICT DO NOTHING`,
+  },
+  {
+    name: "create_provider_keys_table",
+    sql: `CREATE TABLE IF NOT EXISTS "provider_keys" (
+      "id" varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+      "workspace_id" varchar REFERENCES "workspaces"("id") ON DELETE CASCADE,
+      "provider" text NOT NULL,
+      "encrypted_key" text NOT NULL,
+      "base_url" text,
+      "label" text,
+      "updated_by" varchar REFERENCES "users"("id") ON DELETE SET NULL,
+      "updated_at" timestamp DEFAULT now()
+    )`,
+  },
+  {
+    name: "create_provider_keys_global_index",
+    sql: `CREATE UNIQUE INDEX IF NOT EXISTS "uix_provider_keys_global" ON "provider_keys" ("provider") WHERE "workspace_id" IS NULL`,
+  },
+  {
+    name: "create_provider_keys_ws_index",
+    sql: `CREATE UNIQUE INDEX IF NOT EXISTS "uix_provider_keys_ws" ON "provider_keys" ("workspace_id", "provider") WHERE "workspace_id" IS NOT NULL`,
+  },
+  {
+    name: "add_agents_react_enabled",
+    sql: `ALTER TABLE "agents" ADD COLUMN IF NOT EXISTS "react_enabled" boolean DEFAULT false`,
+  },
+  {
+    name: "add_cloud_provider_kubernetes",
+    sql: `ALTER TYPE "cloud_provider" ADD VALUE IF NOT EXISTS 'kubernetes'`,
+  },
 ];
 
 const IDEMPOTENT_ERROR_CODES = new Set([

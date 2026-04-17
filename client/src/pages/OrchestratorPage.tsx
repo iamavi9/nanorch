@@ -21,6 +21,7 @@ const PROVIDERS = [
   { id: "anthropic", name: "Anthropic", models: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"] },
   { id: "gemini", name: "Google Gemini", models: ["gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-3.1-flash-lite-preview", "gemini-2.5-pro", "gemini-2.5-flash"] },
   { id: "ollama", name: "Ollama (on-prem)", models: ["llama3.1", "llama3.2", "qwen2.5", "mistral", "codellama", "deepseek-r1"] },
+  { id: "vllm", name: "vLLM (on-prem / GPU cluster)", models: ["meta-llama/Llama-3.1-70B-Instruct", "meta-llama/Llama-3.1-8B-Instruct", "Qwen/Qwen2.5-72B-Instruct", "Qwen/Qwen2.5-7B-Instruct", "mistralai/Mixtral-8x7B-Instruct-v0.1", "mistralai/Mistral-Large-Instruct-2407", "deepseek-ai/DeepSeek-V3", "microsoft/Phi-4"] },
 ];
 
 interface Props {
@@ -34,6 +35,7 @@ interface OrchestratorForm {
   provider: string;
   model: string;
   baseUrl: string;
+  vllmApiKey: string;
   systemPrompt: string;
   maxConcurrency: number;
   maxRetries: number;
@@ -48,6 +50,7 @@ const defaultForm: OrchestratorForm = {
   provider: "openai",
   model: "gpt-5.4",
   baseUrl: "",
+  vllmApiKey: "",
   systemPrompt: "",
   maxConcurrency: 3,
   maxRetries: 2,
@@ -119,6 +122,7 @@ export default function OrchestratorPage({ workspaceId, orchestratorId }: Props)
         provider: orchestrator.provider,
         model: orchestrator.model,
         baseUrl: (orchestrator as any).baseUrl ?? "",
+        vllmApiKey: (orchestrator as any).vllmApiKey ?? "",
         systemPrompt: orchestrator.systemPrompt ?? "",
         maxConcurrency: orchestrator.maxConcurrency ?? 3,
         maxRetries: orchestrator.maxRetries ?? 2,
@@ -182,7 +186,7 @@ export default function OrchestratorPage({ workspaceId, orchestratorId }: Props)
           </div>
           {orchestrator.description && <p className="text-muted-foreground">{orchestrator.description}</p>}
           <div className="flex items-center gap-2 mt-2">
-            <Badge variant="outline" className="capitalize">{orchestrator.provider}</Badge>
+            <Badge variant="outline">{PROVIDERS.find((p) => p.id === orchestrator.provider)?.name ?? orchestrator.provider}</Badge>
             <Badge variant="secondary" className="font-mono">{orchestrator.model}</Badge>
             <span className="text-xs text-muted-foreground">Concurrency: {orchestrator.maxConcurrency}</span>
             <span className="text-xs text-muted-foreground">Timeout: {orchestrator.timeoutSeconds}s</span>
@@ -295,11 +299,11 @@ function OrchestratorFormDialog({ open, onOpenChange, form, setForm, onSubmit, i
             </div>
             <div>
               <Label>Model</Label>
-              {form.provider === "ollama" ? (
+              {(form.provider === "ollama" || form.provider === "vllm") ? (
                 <Input
                   value={form.model}
                   onChange={(e) => setForm({ ...form, model: e.target.value })}
-                  placeholder="e.g. llama3.1, qwen2.5, mistral"
+                  placeholder={form.provider === "vllm" ? "e.g. Qwen/Qwen2.5-72B-Instruct" : "e.g. llama3.1, qwen2.5, mistral"}
                   className="mt-1 font-mono text-sm"
                   data-testid="input-model"
                 />
@@ -331,6 +335,38 @@ function OrchestratorFormDialog({ open, onOpenChange, form, setForm, onSubmit, i
               <p className="text-xs text-muted-foreground mt-1">
                 URL of your Ollama instance. On EC2, use the private IP or hostname.
               </p>
+            </div>
+          )}
+
+          {form.provider === "vllm" && (
+            <div className="space-y-3">
+              <div>
+                <Label>vLLM Base URL</Label>
+                <Input
+                  value={form.baseUrl}
+                  onChange={(e) => setForm({ ...form, baseUrl: e.target.value })}
+                  placeholder="http://localhost:8000"
+                  className="mt-1 font-mono text-sm"
+                  data-testid="input-vllm-base-url"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  URL of your vLLM server. NanoOrch appends <code className="bg-muted px-1 rounded">/v1</code> automatically.
+                </p>
+              </div>
+              <div>
+                <Label>API Key <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                <Input
+                  type="password"
+                  value={form.vllmApiKey}
+                  onChange={(e) => setForm({ ...form, vllmApiKey: e.target.value })}
+                  placeholder="Leave blank for private-network deployments"
+                  className="mt-1 font-mono text-sm"
+                  data-testid="input-vllm-api-key"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Required only if vLLM was started with <code className="bg-muted px-1 rounded">--api-key</code>. Stored encrypted at rest.
+                </p>
+              </div>
             </div>
           )}
 
@@ -391,11 +427,11 @@ function OrchestratorFormDialog({ open, onOpenChange, form, setForm, onSubmit, i
               </div>
               <div>
                 <Label className="text-xs">Failover Model</Label>
-                {form.failoverProvider === "ollama" ? (
+                {(form.failoverProvider === "ollama" || form.failoverProvider === "vllm") ? (
                   <Input
                     value={form.failoverModel}
                     onChange={(e) => setForm({ ...form, failoverModel: e.target.value })}
-                    placeholder="e.g. llama3.1"
+                    placeholder={form.failoverProvider === "vllm" ? "e.g. Qwen/Qwen2.5-72B-Instruct" : "e.g. llama3.1"}
                     className="mt-1 font-mono text-xs"
                     disabled={!form.failoverProvider}
                     data-testid="input-failover-model"

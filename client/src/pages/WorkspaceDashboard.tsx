@@ -260,7 +260,7 @@ function OrchestratorCard({ orch, workspaceId }: { orch: Orchestrator; workspace
           <div className="min-w-0">
             <CardTitle className="text-sm truncate">{orch.name}</CardTitle>
             <CardDescription className="text-xs mt-0.5 flex items-center gap-1.5 flex-wrap">
-              <Badge variant="outline" className="text-xs capitalize px-1.5 py-0">{orch.provider}</Badge>
+              <Badge variant="outline" className="text-xs px-1.5 py-0">{{ openai: "OpenAI", anthropic: "Anthropic", gemini: "Gemini", ollama: "Ollama", vllm: "vLLM" }[orch.provider] ?? orch.provider}</Badge>
               <span className="font-mono text-muted-foreground/70 truncate">{orch.model}</span>
             </CardDescription>
           </div>

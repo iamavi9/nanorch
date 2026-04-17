@@ -2,9 +2,10 @@ import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { APP_NAME, APP_TAGLINE } from "@/lib/config";
-import { Plus, Network, Zap, Trash2, Moon, Sun, Settings2, ShieldAlert, Pencil, MessageSquare, KeyRound } from "lucide-react";
+import { Plus, Network, Zap, Trash2, Moon, Sun, Settings2, ShieldAlert, Pencil, MessageSquare, Settings, BarChart2, DollarSign, Activity, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -17,11 +18,11 @@ import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useTheme } from "@/components/ThemeProvider";
-import { useAuth } from "@/hooks/useAuth";
+import { useAuth, useLogout } from "@/hooks/useAuth";
 import type { Workspace, WorkspaceConfig } from "@shared/schema";
 
-const AI_PROVIDERS = ["openai", "anthropic", "gemini", "ollama"] as const;
-const CLOUD_PROVIDERS = ["aws", "gcp", "azure", "jira", "github", "gitlab", "ragflow", "teams"] as const;
+const AI_PROVIDERS = ["openai", "anthropic", "gemini", "ollama", "vllm"] as const;
+const CLOUD_PROVIDERS = ["aws", "gcp", "azure", "jira", "github", "gitlab", "ragflow", "teams", "slack", "google_chat", "servicenow", "postgresql", "kubernetes"] as const;
 const CHANNEL_TYPES = ["api", "webhook", "slack", "teams", "google_chat", "generic_webhook"] as const;
 
 type QuotaData = {
@@ -42,6 +43,19 @@ function QuotaBar({ label, count, max }: { label: string; count: number; max: nu
       <span className={`w-14 text-right tabular-nums ${near ? "text-destructive font-medium" : "text-muted-foreground"}`}>{count}/{max}</span>
     </div>
   );
+}
+
+const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+  aws: "AWS", gcp: "Google Cloud", azure: "Azure",
+  ragflow: "RAGFlow", jira: "Jira", github: "GitHub", gitlab: "GitLab",
+  teams: "MS Teams", slack: "Slack", google_chat: "Google Chat",
+  servicenow: "ServiceNow", postgresql: "PostgreSQL", kubernetes: "Kubernetes",
+  openai: "OpenAI", anthropic: "Anthropic", gemini: "Gemini", ollama: "Ollama", vllm: "vLLM",
+  api: "API", webhook: "Webhook", generic_webhook: "Generic Webhook",
+};
+
+function fmtProvider(opt: string): string {
+  return PROVIDER_DISPLAY_NAMES[opt] ?? opt.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function ProviderGroup({
@@ -81,7 +95,7 @@ function ProviderGroup({
                 }}
                 data-testid={`checkbox-${label.toLowerCase().replace(/\s/g, "-")}-${opt}`}
               />
-              <label htmlFor={`${label}-${opt}`} className="text-xs capitalize cursor-pointer">{opt}</label>
+              <label htmlFor={`${label}-${opt}`} className="text-xs cursor-pointer">{fmtProvider(opt)}</label>
             </div>
           ))}
         </div>
@@ -224,10 +238,29 @@ export default function WorkspacesPage() {
   const [editForm, setEditForm] = useState({ name: "", slug: "", description: "", isCommsWorkspace: false });
   const [form, setForm] = useState({ name: "", slug: "", description: "", isCommsWorkspace: false });
   const { user } = useAuth();
+  const logout = useLogout();
   const isGlobalAdmin = user?.role === "admin";
+
+  const [globalDays, setGlobalDays] = useState("30");
 
   const { data: workspaces, isLoading } = useQuery<Workspace[]>({
     queryKey: isGlobalAdmin ? ["/api/workspaces"] : ["/api/auth/my-admin-workspaces"],
+  });
+
+  const { data: globalStats, isLoading: globalStatsLoading } = useQuery<{
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalCostUsd: number;
+    byWorkspace: Array<{ workspaceId: string; workspaceName: string; inputTokens: number; outputTokens: number; costUsd: number; calls: number }>;
+    byDay: Array<{ date: string; inputTokens: number; outputTokens: number; costUsd: number }>;
+    byProvider: Array<{ provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number }>;
+  }>({
+    queryKey: ["/api/admin/observability", globalDays],
+    queryFn: async () => {
+      const res = await fetch(`/api/admin/observability?days=${globalDays}`, { credentials: "include" });
+      return res.json();
+    },
+    enabled: isGlobalAdmin,
   });
 
   const createMutation = useMutation({
@@ -275,9 +308,14 @@ export default function WorkspacesPage() {
             <span className="font-bold text-lg">{APP_NAME}</span>
             <Badge variant="secondary" className="text-xs">{APP_TAGLINE}</Badge>
           </div>
-          <Button variant="ghost" size="icon" onClick={toggleTheme} data-testid="button-toggle-theme">
-            {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button variant="ghost" size="icon" onClick={toggleTheme} data-testid="button-toggle-theme">
+              {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            </Button>
+            <Button variant="ghost" size="icon" onClick={() => logout.mutate()} data-testid="button-logout">
+              <LogOut className="w-4 h-4" />
+            </Button>
+          </div>
         </div>
       </header>
 
@@ -291,10 +329,10 @@ export default function WorkspacesPage() {
           </div>
           {isGlobalAdmin && (
             <div className="flex items-center gap-2">
-              <Link href="/admin/sso">
-                <Button variant="outline" data-testid="link-sso-settings">
-                  <KeyRound className="w-4 h-4 mr-2" />
-                  SSO Settings
+              <Link href="/admin">
+                <Button variant="outline" data-testid="link-platform-admin">
+                  <Settings className="w-4 h-4 mr-2" />
+                  Platform Admin
                 </Button>
               </Link>
               <Button onClick={() => setOpen(true)} data-testid="button-create-workspace">
@@ -382,6 +420,159 @@ export default function WorkspacesPage() {
                 </CardContent>
               </Card>
             ))}
+          </div>
+        )}
+
+        {/* Global token usage overview — system admins only */}
+        {isGlobalAdmin && (
+          <div className="mt-12">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-lg font-semibold flex items-center gap-2">
+                  <BarChart2 className="w-5 h-5 text-primary" />
+                  Global Token Usage
+                </h2>
+                <p className="text-sm text-muted-foreground mt-0.5">Aggregated AI token consumption across all workspaces</p>
+              </div>
+              <select
+                value={globalDays}
+                onChange={(e) => setGlobalDays(e.target.value)}
+                className="text-sm border border-border rounded-md px-2 py-1 bg-background"
+                data-testid="select-global-days"
+              >
+                <option value="7">Last 7 days</option>
+                <option value="30">Last 30 days</option>
+                <option value="90">Last 90 days</option>
+              </select>
+            </div>
+
+            {globalStatsLoading ? (
+              <div className="grid grid-cols-3 gap-4 mb-6">
+                {[1, 2, 3].map((i) => <Skeleton key={i} className="h-24" />)}
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                  <Card>
+                    <CardContent className="pt-4">
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <p className="text-sm text-muted-foreground">Total Tokens</p>
+                          <p className="text-2xl font-bold mt-1" data-testid="stat-global-total-tokens">
+                            {((globalStats?.totalInputTokens ?? 0) + (globalStats?.totalOutputTokens ?? 0)).toLocaleString()}
+                          </p>
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {(globalStats?.totalInputTokens ?? 0).toLocaleString()} in / {(globalStats?.totalOutputTokens ?? 0).toLocaleString()} out
+                          </p>
+                        </div>
+                        <div className="w-9 h-9 rounded-lg bg-blue-500 flex items-center justify-center shrink-0">
+                          <Activity className="w-5 h-5 text-white" />
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="pt-4">
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <p className="text-sm text-muted-foreground">Est. Cost</p>
+                          <p className="text-2xl font-bold mt-1" data-testid="stat-global-cost">
+                            ${(globalStats?.totalCostUsd ?? 0).toFixed(4)}
+                          </p>
+                          <p className="text-xs text-muted-foreground mt-0.5">Last {globalDays} days</p>
+                        </div>
+                        <div className="w-9 h-9 rounded-lg bg-emerald-500 flex items-center justify-center shrink-0">
+                          <DollarSign className="w-5 h-5 text-white" />
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="pt-4">
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <p className="text-sm text-muted-foreground">Active Workspaces</p>
+                          <p className="text-2xl font-bold mt-1" data-testid="stat-global-active-workspaces">
+                            {globalStats?.byWorkspace.filter(w => w.calls > 0).length ?? 0}
+                            <span className="text-base font-normal text-muted-foreground ml-1">/ {globalStats?.byWorkspace.length ?? 0}</span>
+                          </p>
+                          <p className="text-xs text-muted-foreground mt-0.5">Active (with usage) in period</p>
+                        </div>
+                        <div className="w-9 h-9 rounded-lg bg-violet-500 flex items-center justify-center shrink-0">
+                          <Network className="w-5 h-5 text-white" />
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                {(globalStats?.byWorkspace.filter(w => w.calls > 0).length ?? 0) === 0 ? (
+                  <Card>
+                    <CardContent className="py-10 text-center text-muted-foreground text-sm">
+                      No token usage recorded in the last {globalDays} days.
+                    </CardContent>
+                  </Card>
+                ) : (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <Card>
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-sm font-medium">Tokens by Workspace</CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <ResponsiveContainer width="100%" height={220}>
+                          <BarChart data={globalStats?.byWorkspace} layout="vertical" margin={{ left: 8, right: 16 }}>
+                            <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                            <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={(v) => v >= 1000 ? `${(v/1000).toFixed(0)}K` : String(v)} />
+                            <YAxis type="category" dataKey="workspaceName" tick={{ fontSize: 11 }} width={100} />
+                            <Tooltip formatter={(v: number, name: string) => [v.toLocaleString(), name === "inputTokens" ? "Input" : "Output"]} />
+                            <Bar dataKey="inputTokens" stackId="a" fill="hsl(var(--primary))" name="inputTokens" />
+                            <Bar dataKey="outputTokens" stackId="a" fill="hsl(var(--primary) / 0.4)" name="outputTokens" />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </CardContent>
+                    </Card>
+
+                    <Card>
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-sm font-medium">Usage Breakdown by Workspace</CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="space-y-2">
+                          {globalStats?.byWorkspace.map((ws) => {
+                            const total = (globalStats.totalInputTokens + globalStats.totalOutputTokens) || 1;
+                            const wsPct = Math.round(((ws.inputTokens + ws.outputTokens) / total) * 100);
+                            const hasUsage = ws.calls > 0;
+                            return (
+                              <div key={ws.workspaceId} className={`space-y-1 ${!hasUsage ? "opacity-50" : ""}`} data-testid={`usage-row-${ws.workspaceId}`}>
+                                <div className="flex items-center justify-between text-sm">
+                                  <Link href={`/workspaces/${ws.workspaceId}/observability`} className="font-medium hover:text-primary transition-colors truncate max-w-[180px]">
+                                    {ws.workspaceName}
+                                  </Link>
+                                  <div className="flex items-center gap-3 text-xs text-muted-foreground shrink-0">
+                                    {hasUsage ? (
+                                      <>
+                                        <span>{(ws.inputTokens + ws.outputTokens).toLocaleString()} tokens</span>
+                                        <span className="w-10 text-right">${ws.costUsd.toFixed(4)}</span>
+                                        <span className="w-8 text-right text-primary font-medium">{wsPct}%</span>
+                                      </>
+                                    ) : (
+                                      <span className="italic">no usage in period</span>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+                                  <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${wsPct}%` }} />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
       </main>

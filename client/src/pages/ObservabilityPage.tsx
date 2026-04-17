@@ -345,7 +345,7 @@ export default function ObservabilityPage({ workspaceId }: ObservabilityPageProp
                     {stats!.byProvider.map((p) => (
                       <div key={`${p.provider}-${p.model}`} className="flex items-center justify-between text-sm p-2 rounded-md bg-muted/40">
                         <div>
-                          <span className="font-medium capitalize">{p.provider}</span>
+                          <span className="font-medium">{{ openai: "OpenAI", anthropic: "Anthropic", gemini: "Gemini", ollama: "Ollama", vllm: "vLLM" }[p.provider] ?? p.provider}</span>
                           <span className="text-muted-foreground mx-1">·</span>
                           <span className="text-muted-foreground text-xs">{p.model}</span>
                         </div>

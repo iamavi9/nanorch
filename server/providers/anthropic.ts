@@ -2,15 +2,15 @@ import Anthropic from "@anthropic-ai/sdk";
 import { loadSecret } from "../lib/secrets";
 import type { RunAgentOptions, RunAgentResult, ToolCall } from "./index";
 
-function getClient() {
+function getClient(apiKey?: string | null, baseUrl?: string | null) {
   return new Anthropic({
-    apiKey: loadSecret("AI_INTEGRATIONS_ANTHROPIC_API_KEY"),
-    baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL,
+    apiKey: apiKey ?? loadSecret("AI_INTEGRATIONS_ANTHROPIC_API_KEY"),
+    baseURL: baseUrl ?? process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL,
   });
 }
 
 export async function runAnthropic(options: RunAgentOptions): Promise<RunAgentResult> {
-  const anthropic = getClient();
+  const anthropic = getClient(options.apiKey, options.baseUrl);
   const messages: Anthropic.MessageParam[] = options.messages
     .filter((m) => m.role !== "system")
     .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
