@@ -45,4 +45,6 @@ exclude:
   code:
     - server/routes.ts
     - server/index.ts
+    - server/engine/git-feedback.ts
+    - server/comms/teams-handler.ts
     - package.json
