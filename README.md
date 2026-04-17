@@ -35,7 +35,6 @@ A self-hosted, multi-tenant platform for orchestrating AI agents across OpenAI, 
 - **MCP Server** — HTTP/SSE Model Context Protocol server at `/mcp`; workspace admins create API keys (`nano_mcp_...`) from the **MCP** page; 8 tools (`list_orchestrators`, `list_agents`, `run_task`, `get_task_status`, `list_pending_approvals`, `approve_request`, `trigger_pipeline`, `fire_scheduled_job`) let Claude Desktop or any MCP-compatible client remotely control the workspace
 - **Collapsible sidebar** — workspace sidebar collapses to a 60 px icon-only rail; icons are clickable with hover tooltips; preference persists in localStorage
 - **Member chat interface** — clean chat page at `/chat/:slug` for end-users (no admin UI visible)
-- **Public pricing page** — marketing page at `/pricing` (no login required) with OSS free tier vs. commercial plan comparison, monthly/annual billing toggle, FAQ, and CTA
 
 ---
 
