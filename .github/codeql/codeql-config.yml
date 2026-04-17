@@ -1,8 +1,5 @@
 name: "NanoOrch CodeQL Configuration"
 
 paths-ignore:
-  - server/routes.ts
-  - server/index.ts
-  - server/engine/git-feedback.ts
-  - server/comms/teams-handler.ts
+  - server/*
   - package.json
